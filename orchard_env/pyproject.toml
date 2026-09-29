@@ -39,8 +39,8 @@ dev = [
 orchard-env-orchestrator = "orchard_env.orchestrator.main:main"
 
 [project.urls]
-Homepage = "https://github.com/microsoft/Orchard"
-Repository = "https://github.com/microsoft/Orchard"
+Homepage = "https://github.com/microsoft/Orchard-Agentic"
+Repository = "https://github.com/microsoft/Orchard-Agentic"
 
 [tool.setuptools.packages.find]
 include = ["orchard_env*"]

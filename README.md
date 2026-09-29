@@ -1,22 +1,27 @@
-# Orchard
+# Orchard-Agentic
 
 <p align="center">
   <a href="https://arxiv.org/abs/2605.15040"><img src="https://img.shields.io/badge/arXiv-2605.15040-b31b1b.svg" alt="arXiv"></a>
-  <a href="https://huggingface.co/datasets/microsoft/Orchard"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Dataset-microsoft%2FOrchard-yellow" alt="Hugging Face dataset"></a>
+  <a href="https://huggingface.co/datasets/microsoft/Orchard"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Research-Data-yellow" alt="Research data on Hugging Face"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License: MIT"></a>
 </p>
 
-**Orchard is an open foundation for agentic modeling research.** We build one
-shared substrate — **Orchard Env** — and then use it to explore agentic modeling
-*recipes* across domains: software engineering, browser navigation, computer
-use, and personal-assistant workflows.
+**Orchard-Agentic is a collection of open-source work on agentic modeling.**
+It brings together research projects, shared infrastructure, datasets, training
+recipes, and evaluation artifacts. The collection includes the foundational
+paper [*Orchard: An Open-Source Agentic Modeling Framework*](https://arxiv.org/abs/2605.15040)
+and subsequent projects such as OpenWebRL and OpenForge RL.
 
-The foundation exists to make the recipes possible. Because the environment
-layer is a stable service rather than a piece of a training stack, every recipe
-reuses the same substrate for trajectory distillation, on-policy RL rollouts,
-and evaluation — so datasets, training recipes, and evaluation protocols stay
-portable across harnesses, domains, and projects instead of being rebuilt for
-each new study.
+**Orchard Env**, **Orchard-SWE**, **Orchard-GUI**, and **Orchard-Claw** are
+established names introduced by the Orchard research and are retained here.
+Throughout this repository, **Orchard-Agentic** refers to the broader collection,
+while **Orchard** refers to the original paper and framework.
+
+Across these projects, Orchard Env provides a stable service rather than a piece
+of any one training stack. This lets research reuse the same substrate for
+trajectory distillation, on-policy RL rollouts, and evaluation, so datasets,
+training recipes, and evaluation protocols stay portable across harnesses,
+domains, and projects instead of being rebuilt for each new study.
 
 <p align="center">
   <img src="docs/figures/orchard-overview.png" alt="Orchard framework overview" width="900">
@@ -29,7 +34,7 @@ each new study.
 | **Trainer** ([`trainer/slime/`](trainer/slime/)) | RL training stack — a vendored [slime](https://github.com/THUDM/slime) fork with Orchard rollout code under [`examples/orchard/`](trainer/slime/examples/orchard/); fork-local changes tracked in [`ORCHARD_CHANGES.md`](trainer/slime/ORCHARD_CHANGES.md). |
 
 - 📄 **Paper:** [*Orchard: An Open-Source Agentic Modeling Framework*](https://arxiv.org/abs/2605.15040) (Peng et al., arXiv:2605.15040)
-- 🤗 **Dataset:** [`microsoft/Orchard`](https://huggingface.co/datasets/microsoft/Orchard) — `swe` (107K SWE trajectories) and `gui` (3,070 multimodal browser-navigation rollouts) subsets
+- 🤗 **Research data:** [Hugging Face dataset](https://huggingface.co/datasets/microsoft/Orchard) — `swe` (107K SWE trajectories) and `gui` (3,070 multimodal browser-navigation rollouts) subsets
 
 ## News
 
@@ -60,8 +65,8 @@ each new study.
   CUA and Gemini CUA.
 
 - **[2026-05] 📄 The [Orchard paper](https://arxiv.org/abs/2605.15040) is on arXiv**,
-  together with the [`microsoft/Orchard`](https://huggingface.co/datasets/microsoft/Orchard)
-  trajectory datasets and Orchard Env.
+  introducing Orchard Env and the Orchard-SWE, Orchard-GUI, and Orchard-Claw
+  research recipes.
 
 ## Recipes
 
@@ -162,7 +167,7 @@ The foundation and the three recipes above are described in
 that build on the same environment layer — see [News](#news).
 
 - 📄 Paper: [arXiv:2605.15040](https://arxiv.org/abs/2605.15040)
-- 🤗 Trajectory datasets: [`microsoft/Orchard`](https://huggingface.co/datasets/microsoft/Orchard) — one repository ships two parallel subsets, both produced inside the same Orchard Env sandbox infrastructure:
+- 🤗 Research data: [Hugging Face dataset](https://huggingface.co/datasets/microsoft/Orchard) — one repository ships two parallel subsets, both produced inside the same Orchard Env sandbox infrastructure:
   - **`swe` config** — 107,185 multi-turn SWE rollouts over 19,287 unique task
     instances across 2,788 repositories, with verified resolve labels
     (74,649 resolved · 32,536 unresolved) and an average of 47.5 turns per

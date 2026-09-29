@@ -28,8 +28,8 @@ sandboxes. See [docs/architecture.md](docs/architecture.md) for the full design.
 ## Installation
 
 ```bash
-git clone https://github.com/microsoft/Orchard.git
-cd Orchard
+git clone https://github.com/microsoft/Orchard-Agentic.git
+cd Orchard-Agentic
 pip install -e "orchard_env[dev]"
 ```
 
@@ -311,7 +311,8 @@ See [tests/README.md](tests/README.md) for what each one covers.
 
 ## Contributing and security
 
-Contributions follow the Orchard [Code of Conduct](../CODE_OF_CONDUCT.md).
+Contributions follow the Orchard-Agentic
+[Code of Conduct](../CODE_OF_CONDUCT.md).
 Report security vulnerabilities privately as described in
 [SECURITY.md](../SECURITY.md) — never through a public GitHub issue.
 
