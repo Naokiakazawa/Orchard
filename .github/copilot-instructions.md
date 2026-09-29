@@ -1,8 +1,14 @@
-# Copilot Instructions for Orchard
+# Copilot Instructions for Orchard-Agentic
 
 ## Architecture
 
-This repo is the **Orchard** project. Everything currently lives under `orchard_env/` — a Kubernetes-based sandbox orchestration service for multi-turn agent↔sandbox interactions (e.g. SWE-bench). `trainer/slime/` is a scaffolded placeholder for the RL trainer fork.
+This repository is the **Orchard-Agentic** research collection. **Orchard** is
+the foundational paper and framework in the collection; established artifact
+names such as **Orchard Env**, **Orchard-SWE**, **Orchard-GUI**, and
+**Orchard-Claw** remain unchanged. Everything currently lives under
+`orchard_env/` — a Kubernetes-based sandbox orchestration service for multi-turn
+agent↔sandbox interactions (e.g. SWE-bench). `trainer/slime/` is a scaffolded
+placeholder for the RL trainer fork.
 
 All paths below are relative to `orchard_env/`. The importable package is `orchard_env` (`orchard_env/orchard_env/`). Three main layers:
 

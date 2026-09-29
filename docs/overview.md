@@ -1,8 +1,14 @@
-# Orchard overview
+# Orchard-Agentic overview
 
-Orchard is a toolkit for training and evaluating agents in real, isolated
-execution environments. It separates *where the agent acts* from *how the agent
-learns*.
+Orchard-Agentic is a collection of open-source research, infrastructure,
+datasets, training recipes, and evaluation artifacts for agentic modeling. It
+hosts the foundational paper *Orchard: An Open-Source Agentic Modeling
+Framework* and subsequent projects such as OpenWebRL and OpenForge RL.
+
+Orchard Env, Orchard-SWE, Orchard-GUI, and Orchard-Claw retain the established
+names introduced by the Orchard research. In this repository, Orchard-Agentic
+refers to the broader collection, while Orchard refers to the original paper and
+framework.
 
 ## Components
 
