@@ -38,13 +38,6 @@ domains, and projects instead of being rebuilt for each new study.
 
 ## News
 
-- **[2026-09] [SecureVibe: Making Vibe Coding More Secure](https://arxiv.org/abs/2609.38606)**
-  teaches coding agents security planning, coding, and testing through Security
-  Suite SFT, reinforcement learning, and hint-guided self-distillation.
-  [Training code](https://github.com/MSR-Orchard/SecureVibe) ·
-  [Evaluation](https://github.com/MSR-Orchard/SecureVibeEval) ·
-  [Project page source and hosting instructions](docs/securevibe/README.md).
-
 - **[2026-07] 🎉 We are excited to release [OpenForge RL](https://arxiv.org/abs/2607.21557)**,
   which extends Orchard to train agents inside their *real deployment harnesses*
   — ZeroClaw, OpenClaw, Codex — instead of the simplified reimplementations open
