@@ -29,20 +29,65 @@ edits, and git patches against that container.
 See [orchard_env/README.md](../orchard_env/README.md) and
 [orchard_env/docs/architecture.md](../orchard_env/docs/architecture.md).
 
+### `orchard_eval/` — evaluation
+
+Runs **any** agent harness against a benchmark on Orchard Env sandboxes: a fresh
+sandbox for the agent, a second fresh one for grading, and scoring by the
+benchmark's own harness. The benchmark, the environment, and the agent are kept
+as separate layers, so changing the agent under test is a config edit rather
+than a new runner.
+
+- **Suite** (`orchard_eval/orchard_evalkit/`) — the importable package; note it
+  is named differently from the directory that holds it. `datasets/` and
+  `grading/` own the benchmark (SWE-bench Verified, Multilingual and Pro),
+  `sandbox.py` / `runner.py` own the pods, and `harnesses/` owns the agent loop
+  — `codex`, `claude`, `opencode`, `pi` and `mini-swe-agent`, plus gold-patch
+  and no-patch harnesses for calibrating a run before spending on it.
+- **Harbor bridge** (`orchard_evalkit/harbor_bridge.py`) — drives `harbor run`
+  for the Harbor-format benchmarks (Terminal-Bench 2.1, DeepSWE 1.1, SWE-bench
+  Pro) instead of reimplementing their trial semantics, then re-reads the
+  results into the same shape the rest of the suite reports. SWE-bench Pro is
+  reachable both ways — natively through `datasets/`+`grading/` and through
+  Harbor — which is what makes each number checkable against the other.
+- **Harbor provider** (`orchard_eval/harbor_orchard/`) — a separately
+  installable package (`harbor-orchard`) that Harbor loads by import path as
+  `harbor_orchard:OrchardEnvironment`. It turns a task's Dockerfile into
+  commands and its mounts into transfers, which is what lets a Harbor task —
+  which expects a local Docker build and a bind mount — run on a pod instead.
+- **CLI** — `orchard-eval run | harbor | report | list-harnesses`, with the
+  benchmark/harness combinations declared in `orchard_eval/configs/`.
+
+See [orchard_eval/README.md](../orchard_eval/README.md) and
+[orchard_eval/harbor_orchard/README.md](../orchard_eval/harbor_orchard/README.md).
+
 ### `trainer/slime/` — the trainer
 
-A vendored fork of the [slime](https://github.com/THUDM/slime) RL training stack,
-with Orchard-specific rollout code under `examples/orchard/`. Fork-local changes
-are tracked in `trainer/slime/ORCHARD_CHANGES.md`.
+A fork of the [slime](https://github.com/THUDM/slime) RL training stack, vendored
+as a git submodule pointing at
+[MSR-Orchard/slime](https://github.com/MSR-Orchard/slime). Orchard-specific
+rollout code lives under
+[`examples/orchard_swe/`](https://github.com/MSR-Orchard/slime/tree/main/examples/orchard_swe)
+and
+[`examples/orchard_gui/`](https://github.com/MSR-Orchard/slime/tree/main/examples/orchard_gui).
+
+Because it is a submodule, a plain `git clone` leaves `trainer/slime/` empty —
+clone with `--recursive`, or run `git submodule update --init trainer/slime`.
+
+Unlike the environment layer, the trainer requires GPUs. See
+[Training](../README.md#training) for the node specs.
 
 ## How they fit together
 
 ```
    ┌──────────────┐    rollout requests    ┌────────────────────┐
-   │  trainer/    │ ─────────────────────▶ │   orchard_env      │
-   │  slime       │                        │   orchestrator     │
-   │              │ ◀───────────────────── │   (FastAPI)        │
-   └──────────────┘   trajectories/rewards └─────────┬──────────┘
+   │  trainer/    │ ─────────────────────▶ │                    │
+   │  slime       │ ◀───────────────────── │   orchard_env      │
+   └──────────────┘   trajectories/rewards │   orchestrator     │
+                                           │   (FastAPI)        │
+   ┌──────────────┐   one sandbox per task │                    │
+   │ orchard_eval │ ─────────────────────▶ │                    │
+   │  + harbor    │ ◀───────────────────── │                    │
+   └──────────────┘    patches / rewards   └─────────┬──────────┘
                                                      │ HTTP to pod IP
                                            ┌─────────▼──────────┐
                                            │   sandbox pods     │
@@ -50,5 +95,8 @@ are tracked in `trainer/slime/ORCHARD_CHANGES.md`.
                                            └────────────────────┘
 ```
 
-The trainer drives rollouts through the `orchard_env` SDK; each rollout gets its
-own sandbox, and results flow back as trajectories for the RL loop.
+Both drive the same SDK. The trainer asks for rollouts and gets one sandbox per
+rollout, with results flowing back as trajectories for the RL loop;
+`orchard_eval` asks for one sandbox per benchmark instance and a second for
+grading. Because the substrate is identical, a model is measured under the same
+execution conditions it was trained in.

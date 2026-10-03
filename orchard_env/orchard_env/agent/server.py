@@ -162,6 +162,9 @@ async def exec_command(request: ExecRequest):
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
             env=env,
+            # Own process group: without it the killpg below signals the
+            # agent's own group and kills the agent along with the command.
+            start_new_session=True,
         )
 
         try:

@@ -5,12 +5,15 @@
 This repository is the **Orchard-Agentic** research collection. **Orchard** is
 the foundational paper and framework in the collection; established artifact
 names such as **Orchard Env**, **Orchard-SWE**, **Orchard-GUI**, and
-**Orchard-Claw** remain unchanged. Everything currently lives under
-`orchard_env/` — a Kubernetes-based sandbox orchestration service for multi-turn
-agent↔sandbox interactions (e.g. SWE-bench). `trainer/slime/` is a scaffolded
-placeholder for the RL trainer fork.
+**Orchard-Claw** remain unchanged. The toolkit trains and evaluates agents in
+real, isolated execution environments. Three top-level components:
 
-All paths below are relative to `orchard_env/`. The importable package is `orchard_env` (`orchard_env/orchard_env/`). Three main layers:
+- **`orchard_env/`** — a Kubernetes-based sandbox orchestration service for multi-turn agent↔sandbox interactions (e.g. SWE-bench). Importable package `orchard_env` (`orchard_env/orchard_env/`). This is what the rest of this document describes.
+- **`orchard_eval/`** — the evaluation suite. **The importable package is `orchard_evalkit` (`orchard_eval/orchard_evalkit/`), deliberately not the same name as the directory holding it** — the distribution and CLI are both `orchard-eval`. Runs any harness (`codex`, `claude`, `opencode`, `pi`, `mini-swe-agent`) against SWE-bench Verified / Multilingual / Pro with `orchard-eval run`, and against Harbor-format benchmarks (Terminal-Bench 2.1, DeepSWE 1.1) with `orchard-eval harbor`. Configs live in `orchard_eval/configs/`, driver scripts in `orchard_eval/scripts/`.
+  - **`orchard_eval/harbor_orchard/`** — nested inside the suite but a *separate* distribution (`harbor-orchard`, package `harbor_orchard`). It provides the Harbor environment provider that Harbor loads by import path as `harbor_orchard:OrchardEnvironment`, translating a task's Dockerfile into commands and its mounts into transfers so a Harbor task runs on a pod.
+- **`trainer/slime/`** — the RL trainer fork, vendored as a git submodule ([MSR-Orchard/slime](https://github.com/MSR-Orchard/slime)). A plain `git clone` leaves it empty; run `git submodule update --init trainer/slime`.
+
+**Unless stated otherwise, all paths below are relative to `orchard_env/`.** Three main layers:
 
 1. **Client SDK** (`orchard_env/client/sandbox_client.py`) — Sync (`SandboxClient`) and async (`AsyncSandboxClient`) Python clients. Both use context managers for lifecycle management. `SandboxInstance` / `AsyncSandboxInstance` handle exec, file ops, and patching. Public API is re-exported from `orchard_env/__init__.py`.
 
@@ -63,6 +66,23 @@ python tests/integration/bench_concurrent.py
 # Build container images (run from orchard_env/, requires registry access)
 ./scripts/build_push.sh
 ```
+
+### The other components
+
+```bash
+# Eval suite — from the repo root. Package `orchard_evalkit`, CLI `orchard-eval`.
+# orchard-env is a dependency and lives in this repo, so both go in one command.
+pip install -e orchard_env -e "orchard_eval[all]"
+cd orchard_eval && python -m pytest -q
+
+# Harbor provider — must be importable by the `harbor` process itself, so both
+# land in the same environment.
+python -m pip install harbor
+python -m pip install -e orchard_env -e orchard_eval/harbor_orchard
+python -m pytest orchard_eval/harbor_orchard/tests
+```
+
+**Import gotcha**: `orchard_eval/` contains a `harbor_orchard/` directory with no `__init__.py`. When the distribution is not installed, `python -c "import harbor_orchard"` run from there resolves to an empty namespace package instead of failing, which surfaces later as a misleading `no attribute 'OrchardEnvironment'`. Verify with `cd /tmp && python -c "import harbor_orchard as m; assert m.__file__"` — the `cd` is what makes the check meaningful.
 
 ## Key Conventions
 

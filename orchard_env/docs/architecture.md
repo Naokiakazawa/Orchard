@@ -166,7 +166,7 @@ never touches the image's own libc, Python, or `PATH`. This is also why
 `orchard_env.agent.pty_runner`, but in the injected layout the files are loose
 scripts and it falls back to a bare `pty_runner` import.
 
-The harness payload (`codex`, `claude`, `pi`, `opencode`, `hermes`) arrives the
+The harness payload (`codex`, `claude`, `pi`, `opencode`, `hermes`, `mini`) arrives the
 same way, but read-only and — on Kubernetes ≥ 1.33 — through an `image:` volume
 source, so the kubelet pulls it once per node instead of copying per pod.
 

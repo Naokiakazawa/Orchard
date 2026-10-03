@@ -67,11 +67,52 @@ API — needs `block_network=False`.
 | `download_content(remote_path)` | Download file content as bytes |
 | `list_files(remote_path)` | List a directory |
 | `get_job(job_id)` | Fetch job status and results |
+| `get_network_config()` | Current egress mode and allowlist |
+| `disable_network(allowlist)` | Restrict egress to CIDR/port rules |
+| `enable_network()` | Restore unrestricted egress |
 | `delete()` | Delete the sandbox |
 
 `exec()` also accepts `login_shell=True` (runs under `bash -lc` instead of
 `bash -c`) and `pty=True` for an interactive session backed by
 `ContainerProcess` / `AsyncContainerProcess`.
+
+### Changing egress on a running sandbox
+
+Egress is otherwise fixed when the pod is created, which leaves no way to
+install software that needs the network and then hand an isolated environment to
+whatever runs next. Rewriting the per-sandbox NetworkPolicy does, because the
+policy is evaluated per packet rather than at admission.
+
+```python
+with client.create_sandbox("python:3.11-slim", block_network=False) as sandbox:
+    sandbox.disable_network(
+        [
+            {
+                "cidr": "203.0.113.10/32",
+                "protocol": "TCP",
+                "port_start": 30000,
+                "port_end": 31000,
+            }
+        ]
+    )
+    sandbox.get_network_config()
+    sandbox.enable_network()
+```
+
+The async client exposes the same three methods with `await`.
+
+A rule needs a `cidr` and a `port_start`; `protocol` defaults to `TCP` and
+`port_end` to `port_start`. A bare address is normalized to a host prefix
+(`/32`, or `/128` for IPv6) and `0.0.0.0/0` is rejected, so "allow everything"
+has to be said as `enable_network()` rather than smuggled in as a rule.
+
+Two limits worth knowing before relying on this:
+
+- `disable_network([])` blocks all *new* egress connections. TCP connections
+  already established are not guaranteed to be terminated.
+- Allowlists are addresses, not names. There is no DNS-name allowlist, and no
+  implicit exemption for port 53 — an isolated pod that is given a hostname
+  cannot resolve it, so resolve to an address before handing one over.
 
 ## `JobResult`
 

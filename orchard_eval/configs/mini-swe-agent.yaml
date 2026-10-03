@@ -1,0 +1,93 @@
+# SWE-bench Verified with mini-swe-agent.
+#
+# Like codex and pi, `mini` ships inside every Orchard Env sandbox, so the whole
+# agent loop — model calls included — runs on the pod and nothing is installed
+# at run time. mini-swe-agent's own SWE-bench config, prompts and submission
+# protocol are used unmodified, so the score is comparable with an upstream
+# mini-swe-agent run.
+#
+#   export MODEL_NAME=... MODEL_BASE_URL=... API_KEY=...
+#   export SANDBOX_BASE_URL=... SANDBOX_API_KEY=...
+#   orchard-eval run -c configs/mini-swe-agent.yaml
+
+run_name: mini-swe-agent-swebench-verified
+output_dir: ./results
+concurrency: 32
+max_retries: 2
+# Whole-rollout attempts when the pod is lost mid-instance (reaped, evicted).
+# This is the catch-all: any cluster fault the suite does not recognize still
+# earns every one of these pods.
+rollout_retries: 2
+# Attempts for a rollout that spent its whole budget instead of losing its pod.
+# Lower on purpose — a deadline is usually a property of the instance, and the
+# next pod spends the same half hour reaching the same wall. Not zero, because
+# a pod that dies in the last seconds of its budget looks exactly like one that
+# ran out of it, and one spare attempt is cheaper than dropping an instance
+# that would have scored. Raise to rollout_retries to treat them alike.
+timeout_retries: 1
+resume: true
+
+harness:
+  name: mini-swe-agent
+  timeout: 1800
+  params:
+    # mini-swe-agent's builtin SWE-bench config, resolved inside the sandbox.
+    # Point at your own YAML to change prompts; use config_overrides for one-off
+    # knobs (each becomes another `-c` on the command line).
+    config: benchmarks/swebench.yaml
+    config_overrides:
+      - agent.step_limit=250
+      - agent.cost_limit=3.0
+    # Seconds for a single bash command inside the sandbox.
+    step_timeout: 60
+    # `mini` ships in the sandbox tools image. On a pod whose image predates it,
+    # install it into an isolated venv in the pod on first use (needs egress).
+    # Set false to fail fast instead of paying for the install on every pod.
+    auto_install: true
+    # Keep each rollout's untouched trajectory JSON next to the parsed one.
+    dump_raw_trajectory: true
+    # Stop the CLI 60s before harness.timeout, from inside the sandbox.
+    #
+    # The deadline the orchestrator puts on the exec is enforced by racing an
+    # in-pod `timeout` against a Python deadline ten seconds later, and when
+    # the latter wins it abandons the exec stream instead of draining it: the
+    # rollout returns a null exit code and zero bytes, throwing away everything
+    # the agent wrote, and the sandbox stops answering so neither the stdout
+    # mirror nor `git diff` can recover it. That cost 18 of 500 pi rollouts and
+    # 17 of 500 mini-swe-agent ones on SWE-bench Verified — the deadline is
+    # what is fragile, not either CLI.
+    #
+    # Stopping the agent first means the exec returns through its ordinary
+    # path, with the transcript and the working tree intact and gradable. The
+    # price is 60s off the agent's budget; raise it if teardown still loses the
+    # race, lower it to give the agent more room.
+    timeout_margin: 60
+
+model:
+  # litellm splits on the first "/" to pick a provider, so the openai/ prefix is
+  # required here and must NOT be in MODEL_NAME (codex/pi pass it through
+  # verbatim). A served id that is itself a path yields "openai//data/...".
+  # MODEL_BASE_URL is staged in the pod as a mini config layer setting
+  # model.model_kwargs.api_base, so it must be reachable FROM THE SANDBOX.
+  name: openai/${MODEL_NAME}
+  base_url: ${MODEL_BASE_URL}
+  api_key_env: API_KEY
+
+sandbox:
+  # base_url and api_key come from SANDBOX_BASE_URL / SANDBOX_API_KEY.
+  cpu: "2"
+  memory: "8Gi"
+  create_timeout: 600
+  command_timeout: 180
+  # The agent calls the model from inside the pod, so egress is required.
+  block_network: false
+  image_prefix: mirror.gcr.io/swebench
+  workdir: /testbed
+
+dataset:
+  name: swe-bench-verified
+  split: test
+
+grading:
+  enabled: true
+  eval_timeout: 1200

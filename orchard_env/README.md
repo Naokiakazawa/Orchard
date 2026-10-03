@@ -9,11 +9,12 @@ turns: run commands, upload/download files, apply git patches, open PTY sessions
 - **Any base image** — the in-pod agent is injected by an init container that
   bundles its own self-contained Python interpreter, so images do not need Python.
 - **Isolation** — pods run in a dedicated namespace with Calico NetworkPolicies;
-  egress can be blocked per sandbox.
+  egress can be blocked per sandbox, and switched between blocked, open, and a
+  CIDR/port allowlist while the pod keeps running.
 - **Scale-out** — multiple orchestrator replicas share state through Redis.
 - **Any-harness training** — the popular agent harnesses (`codex`, `claude`, `pi`,
-  `opencode`, `hermes`) are preinstalled on `PATH` in every sandbox, so you can
-  collect rollouts under whichever harness you train against.
+  `opencode`, `hermes`, `mini`) are preinstalled on `PATH` in every sandbox, so
+  you can collect rollouts under whichever harness you train against.
 
 <p align="center">
   <img src="docs/figures/orchard-architecture.png" alt="Orchard Env architecture" width="850">
@@ -193,7 +194,7 @@ export SANDBOX_API_KEY="<one-of-your-keys>"
 
 ## Built-in agent harnesses
 
-Every sandbox ships with five popular agent harnesses already on `PATH` — no
+Every sandbox ships with six popular agent harnesses already on `PATH` — no
 install step and no network access needed inside the sandbox. Training or
 evaluating against a different harness is a change of command, not a change of
 image.
@@ -205,6 +206,7 @@ image.
 | `pi` | [earendil-works/pi](https://github.com/earendil-works/pi) |
 | `opencode` | [OpenCode](https://opencode.ai) |
 | `hermes` | [Nous Research Hermes](https://github.com/nousresearch/hermes-agent) |
+| `mini` | [mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent) |
 
 ```python
 with client.create_sandbox(image="ubuntu:22.04") as sandbox:
@@ -223,24 +225,24 @@ with client.create_sandbox(image="ubuntu:22.04") as sandbox:
 
 Notes:
 
-- Works with **any** base image: every harness is verified on glibc 2.17 → 2.39
-  (CentOS 7 through Ubuntu 24.04), including SWE-bench images. No Node.js or
-  Python is required in the image — each payload is self-contained and relocatable.
+- Works with **any** base image: glibc 2.17 → 2.39 (CentOS 7 through Ubuntu
+  24.04) and musl-based Alpine, including SWE-bench and SWE-bench Pro images.
+  Glibc-linked harnesses run against a private runtime shipped in the payload, so
+  nothing is installed into your image. No Node.js or Python is required —
+  each payload is self-contained and relocatable.
 - Reachable from every entry point: `sandbox.exec()`, `exec(..., login_shell=True)`,
   and `kubectl exec -it sandbox-<id> -n sandbox-pods -- bash`.
 - The harnesses never shadow a tool your image already provides and are **appended**
   to `PATH`, so an existing toolchain (e.g. SWE-bench's `/opt/miniconda3/bin`) keeps
-  priority. `hermes` runs under its own bundled interpreter and never touches the
-  image's `python`.
+  priority. `hermes` and `mini` run under their own bundled interpreters and
+  never touch the image's `python`.
 - The payload is mounted **read-only** at `/opt/sandbox-tools`;
   `cat /opt/sandbox-tools/VERSIONS` shows the exact versions baked in.
 - `block_network=True` sandboxes can still run the harnesses, but the harnesses
   themselves need egress to reach model APIs — use `block_network=False` for real
   usage.
 
-Copilot CLI, Cursor Agent and Gemini CLI are **not** bundled: their payloads
-require `GLIBC_2.28`, so supporting the full image range would mean shipping a
-patched private glibc for them.
+Copilot CLI, Cursor Agent and Gemini CLI are **not** bundled.
 
 ### How it works
 
@@ -254,7 +256,8 @@ so the kubelet pulls it **once per node** and there is no per-pod copy.
 
 # or pin exact harness versions
 CODEX_VERSION=0.145.0 CLAUDE_CODE_VERSION=2.1.220 OPENCODE_VERSION=1.18.7 \
-  PI_VERSION=v0.82.1 HERMES_VERSION=0.19.0 ./scripts/build_push.sh tools
+  PI_VERSION=v0.82.1 HERMES_VERSION=0.19.0 MINI_SWE_AGENT_VERSION=2.4.6 \
+  TOOLS_TAG=2026-09-10-musl ./scripts/build_push.sh tools
 ```
 
 Relevant orchestrator settings (see `k8s/configmap.yaml`):
@@ -271,10 +274,15 @@ On clusters older than k8s 1.33, switch `SANDBOX_TOOLS_VOLUME_MODE` to
 which costs roughly 1.1 GB of ephemeral disk per sandbox — prefer `image` mode
 wherever it is available.
 
-> **Updating harness versions:** the payload is pulled with `IfNotPresent`, so
-> nodes that already cached `sandbox-tools:latest` keep serving the old copy. Push
-> a new tag (e.g. `TOOLS_TAG=2026-07-27 ./scripts/build_push.sh tools`) and point
-> `SANDBOX_TOOLS_IMAGE` at it so every node picks up the change.
+> **Updating harness versions:** the payload is pulled with `IfNotPresent`, so a
+> node that already cached `sandbox-tools:latest` keeps serving the old copy.
+> Always push a new immutable tag and deploy that same tag:
+> `TOOLS_TAG=2026-09-10-musl ./scripts/build_push.sh tools`, then
+> `TOOLS_TAG=2026-09-10-musl ./scripts/deploy_k8s.sh`.
+
+**Benchmarking these harnesses:** [`orchard_eval/`](../orchard_eval/) runs any of
+them against SWE-bench Verified on this service, graded by the official
+SWE-bench harness, with `harness.name` selecting the agent.
 
 ## Development
 

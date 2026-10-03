@@ -2,8 +2,8 @@
 """
 Running agent harnesses inside a sandbox.
 
-Every sandbox ships with five agent harnesses already on ``PATH`` — ``codex``,
-``claude``, ``pi``, ``opencode`` and ``hermes`` — regardless of the base image.
+Every sandbox ships with six agent harnesses already on ``PATH`` — ``codex``,
+``claude``, ``pi``, ``opencode``, ``hermes`` and ``mini`` — regardless of the base image.
 Nothing is installed at runtime and no network access is needed inside the
 sandbox to make them available.
 
@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from orchard_env import SandboxClient
 
-HARNESSES = ["codex", "claude", "pi", "opencode", "hermes"]
+HARNESSES = ["codex", "claude", "pi", "opencode", "hermes", "mini"]
 
 # Credential each harness needs, and the command shape used to drive it
 # non-interactively.

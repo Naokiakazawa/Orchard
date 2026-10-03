@@ -31,6 +31,8 @@ export BASE_URL=http://localhost:8000
 | `GET` | `/sandboxes/{sandbox_id}/wait` | Block until the sandbox is ready |
 | `DELETE` | `/sandboxes/{sandbox_id}` | Delete a sandbox |
 | `POST` | `/sandboxes/{sandbox_id}/heartbeat` | Refresh the sandbox liveness timer |
+| `GET` | `/sandboxes/{sandbox_id}/network` | Current egress mode and allowlist |
+| `PUT` | `/sandboxes/{sandbox_id}/network` | Change egress on a running sandbox |
 | `POST` | `/sandboxes/{sandbox_id}/exec` | Run a command |
 | `WS` | `/sandboxes/{sandbox_id}/exec/pty` | Interactive PTY session |
 | `POST` | `/sandboxes/{sandbox_id}/apply_patch` | Apply a git patch |
@@ -197,6 +199,54 @@ X-API-Key: your-api-key
 ```
 
 `size` is an integer (bytes). `type` is `"file"` or `"directory"`.
+
+### Network control
+
+Egress is fixed when a pod is created. These routes rewrite the per-sandbox
+NetworkPolicy instead, so an environment can be prepared with the network and
+then isolated before something untrusted runs in it.
+
+```http
+PUT /sandboxes/{sandbox_id}/network
+Content-Type: application/json
+
+{
+  "mode": "restricted",
+  "allowlist": [{
+    "cidr": "203.0.113.10/32",
+    "protocol": "TCP",
+    "port_start": 30000,
+    "port_end": 31000
+  }]
+}
+```
+
+`mode` is `restricted` or `enabled`. An `enabled` request must carry an empty
+allowlist; a `restricted` one with an empty allowlist denies all new egress.
+A rule needs `cidr` and `port_start` — `protocol` defaults to `TCP`, `port_end`
+to `port_start`, a bare address is normalized to a host prefix, and `0.0.0.0/0`
+is rejected.
+
+```http
+GET /sandboxes/{sandbox_id}/network
+```
+
+Returns the effective Kubernetes policy and the normalized allowlist, and
+refreshes the Redis metadata cache:
+
+```json
+{
+  "sandbox_id": "abc123",
+  "mode": "restricted",
+  "allowlist": [{"cidr": "203.0.113.10/32", "protocol": "TCP",
+                 "port_start": 30000, "port_end": 31000}]
+}
+```
+
+Updates are serialized per sandbox and fenced by a revision annotation, so a
+`409` means a concurrent update won and the request should be re-read and
+retried rather than forced. Only addresses can be allowlisted: there is no
+DNS-name support, and no implicit exemption for port 53.
 
 ### Delete a sandbox
 

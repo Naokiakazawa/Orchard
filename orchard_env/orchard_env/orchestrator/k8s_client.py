@@ -4,6 +4,8 @@ import asyncio
 import logging
 import random
 import re
+import time
+from typing import Dict, List, Optional, Tuple
 
 import urllib3
 from kubernetes import client, config
@@ -15,12 +17,16 @@ from orchard_env.orchestrator.settings import settings
 logger = logging.getLogger(__name__)
 
 
+class NetworkPolicyConflictError(RuntimeError):
+    """Raised when a concurrent writer changes a managed network policy."""
+
+
 class K8sClient:
     """Kubernetes client wrapper."""
-
+    
     # Transient error status codes that should be retried
     RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
-
+    
     # Pod phases that no longer consume resources
     TERMINAL_POD_PHASES = ("Succeeded", "Failed")
 
@@ -32,36 +38,36 @@ class K8sClient:
         else:
             config.load_kube_config()
             logger.info("Loaded kubeconfig configuration")
-
+        
         self.configuration = client.Configuration.get_default_copy()
-
+        
         # Set connection pool size and timeouts to handle high concurrency
         pool_size = settings.k8s_api_pool_size
         self.configuration.connection_pool_maxsize = pool_size
         # Disable SSL verification retries at urllib3 level — we handle retries ourselves
         self.configuration.retries = urllib3.util.retry.Retry(total=0)
-
+        
         # Shared API client for CRUD operations (connection pool reuse)
         self._shared_api_client = client.ApiClient(self.configuration)
         self._core_v1 = client.CoreV1Api(self._shared_api_client)
         self._networking_v1 = client.NetworkingV1Api(self._shared_api_client)
         self._apps_v1 = client.AppsV1Api(self._shared_api_client)
-
+        
         # Semaphore to throttle concurrent K8s API calls
         self._api_semaphore = asyncio.Semaphore(settings.k8s_api_concurrency)
         # Separate semaphore for exec WebSocket connections (higher limit, long-lived)
         self._exec_semaphore = asyncio.Semaphore(settings.k8s_exec_concurrency)
-
+        
         logger.info(
             f"K8s client initialized, API server: {self.configuration.host}, "
             f"pool_size={pool_size}, concurrency={settings.k8s_api_concurrency}, "
             f"exec_concurrency={settings.k8s_exec_concurrency}"
         )
-
+    
     def _get_core_v1_api(self) -> client.CoreV1Api:
         """Get the shared CoreV1Api instance for CRUD operations."""
         return self._core_v1
-
+    
     def _get_fresh_core_v1_api(self) -> client.CoreV1Api:
         """Create a fresh CoreV1Api for streaming/exec operations.
 
@@ -71,23 +77,23 @@ class K8sClient:
         simultaneous TLS handshakes is bounded.
         """
         return client.CoreV1Api(client.ApiClient(self.configuration))
-
+    
     def _get_networking_v1_api(self) -> client.NetworkingV1Api:
         """Get the shared NetworkingV1Api instance."""
         return self._networking_v1
-
+    
     def _get_apps_v1_api(self) -> client.AppsV1Api:
         """Get the shared AppsV1Api instance."""
         return self._apps_v1
-
+    
     async def _k8s_call(self, func, *args, **kwargs):
         """Execute a K8s API call with semaphore throttling, timeout, and retry.
-
+        
         Wraps the synchronous K8s API call in asyncio.to_thread with:
         - Semaphore to limit concurrent calls
         - Configurable request timeout
         - Retry with exponential backoff for transient errors
-
+        
         The semaphore is acquired PER ATTEMPT and released between retries.
         This prevents a single failing request from monopolizing a semaphore
         slot for minutes (connect_timeout × retries + backoff). The exponential
@@ -96,23 +102,20 @@ class K8sClient:
         connect_timeout = settings.k8s_connect_timeout
         read_timeout = settings.k8s_api_timeout
         max_retries = settings.k8s_api_retries
-
+        
         # Add _request_timeout if not already specified
         # Use (connect_timeout, read_timeout) tuple so TCP connect fails fast
         # while allowing adequate time for the API server to respond.
-        if "_request_timeout" not in kwargs:
-            kwargs["_request_timeout"] = (connect_timeout, read_timeout)
-
+        if '_request_timeout' not in kwargs:
+            kwargs['_request_timeout'] = (connect_timeout, read_timeout)
+        
         for attempt in range(max_retries):
             try:
                 async with self._api_semaphore:
                     return await asyncio.to_thread(func, *args, **kwargs)
             except ApiException as e:
-                if (
-                    e.status in self.RETRYABLE_STATUS_CODES
-                    and attempt < max_retries - 1
-                ):
-                    wait = (2**attempt) + random.uniform(0, 1)
+                if e.status in self.RETRYABLE_STATUS_CODES and attempt < max_retries - 1:
+                    wait = (2 ** attempt) + random.uniform(0, 1)
                     logger.warning(
                         f"K8s API call {func.__name__} returned {e.status}, "
                         f"retrying in {wait:.1f}s (attempt {attempt + 1}/{max_retries})"
@@ -120,9 +123,9 @@ class K8sClient:
                     await asyncio.sleep(wait)
                     continue
                 raise
-            except urllib3.exceptions.TimeoutError:
+            except urllib3.exceptions.TimeoutError as e:
                 if attempt < max_retries - 1:
-                    wait = (2**attempt) + random.uniform(0, 1)
+                    wait = (2 ** attempt) + random.uniform(0, 1)
                     logger.warning(
                         f"K8s API call {func.__name__} timed out, "
                         f"retrying in {wait:.1f}s (attempt {attempt + 1}/{max_retries})"
@@ -133,21 +136,14 @@ class K8sClient:
             except Exception as e:
                 # urllib3 / http.client connection errors wrapped by kubernetes client
                 err_str = str(e)
-                is_transient = any(
-                    keyword in err_str
-                    for keyword in (
-                        "Connection timed out",
-                        "Max retries exceeded",
-                        "RemoteDisconnected",
-                        "Connection aborted",
-                        "Connection refused",
-                        "Connection reset",
-                        "BrokenPipeError",
-                        "ConnectionResetError",
-                    )
-                )
+                is_transient = any(keyword in err_str for keyword in (
+                    'Connection timed out', 'Max retries exceeded',
+                    'RemoteDisconnected', 'Connection aborted',
+                    'Connection refused', 'Connection reset',
+                    'BrokenPipeError', 'ConnectionResetError',
+                ))
                 if is_transient and attempt < max_retries - 1:
-                    wait = (2**attempt) + random.uniform(0, 1)
+                    wait = (2 ** attempt) + random.uniform(0, 1)
                     logger.warning(
                         f"K8s API call {func.__name__} connection error, "
                         f"retrying in {wait:.1f}s (attempt {attempt + 1}/{max_retries}): {e}"
@@ -155,25 +151,29 @@ class K8sClient:
                     await asyncio.sleep(wait)
                     continue
                 raise
-
-    async def create_namespace(
-        self, name: str, labels: dict[str, str] | None = None
-    ) -> None:
+    
+    async def create_namespace(self, name: str, labels: Optional[Dict[str, str]] = None) -> None:
         """Create a namespace."""
         namespace = client.V1Namespace(
-            metadata=client.V1ObjectMeta(name=name, labels=labels or {})
+            metadata=client.V1ObjectMeta(
+                name=name,
+                labels=labels or {}
+            )
         )
-
+        
         try:
             core_v1 = self._get_core_v1_api()
-            await self._k8s_call(core_v1.create_namespace, body=namespace)
+            await self._k8s_call(
+                core_v1.create_namespace,
+                body=namespace
+            )
             logger.info(f"Created namespace: {name}")
         except ApiException as e:
             if e.status == 409:
                 logger.warning(f"Namespace {name} already exists")
             else:
                 raise
-
+    
     async def delete_namespace(self, name: str) -> None:
         """Delete a namespace."""
         try:
@@ -182,8 +182,9 @@ class K8sClient:
                 core_v1.delete_namespace,
                 name=name,
                 body=client.V1DeleteOptions(
-                    grace_period_seconds=0, propagation_policy="Background"
-                ),
+                    grace_period_seconds=0,
+                    propagation_policy='Background'
+                )
             )
             logger.info(f"Deleted namespace: {name}")
         except ApiException as e:
@@ -191,27 +192,30 @@ class K8sClient:
                 logger.warning(f"Namespace {name} not found")
             else:
                 raise
-
+    
     async def namespace_exists(self, name: str) -> bool:
         """Check if namespace exists."""
         try:
             core_v1 = self._get_core_v1_api()
-            await self._k8s_call(core_v1.read_namespace, name=name)
+            await self._k8s_call(
+                core_v1.read_namespace,
+                name=name
+            )
             return True
         except ApiException as e:
             if e.status == 404:
                 return False
             raise
-
+    
     async def create_network_policy(
         self,
         name: str,
         namespace: str,
         block_egress: bool = True,
-        pod_labels: dict[str, str] | None = None,
-    ) -> None:
+        pod_labels: Optional[Dict[str, str]] = None,
+    ) -> bool:
         """Create a network policy.
-
+        
         Args:
             name: Policy name
             namespace: Namespace
@@ -224,45 +228,309 @@ class K8sClient:
             pod_selector = client.V1LabelSelector(match_labels=pod_labels)
         else:
             pod_selector = client.V1LabelSelector()
-
+        
         policy_spec = client.V1NetworkPolicySpec(
             pod_selector=pod_selector,
             policy_types=["Egress"],
         )
-
+        
         if block_egress:
             # Empty egress list = deny all
             policy_spec.egress = []
         else:
             # Allow all egress
             policy_spec.egress = [client.V1NetworkPolicyEgressRule()]
-
+        
         policy = client.V1NetworkPolicy(
-            metadata=client.V1ObjectMeta(name=name), spec=policy_spec
+            metadata=client.V1ObjectMeta(name=name),
+            spec=policy_spec
         )
-
+        
         try:
             networking_v1 = self._get_networking_v1_api()
+            await self._k8s_call(
+                networking_v1.create_namespaced_network_policy,
+                namespace=namespace,
+                body=policy
+            )
+            logger.info(f"Created network policy: {name} in {namespace}")
+            return True
+        except ApiException as e:
+            if e.status == 409:
+                logger.warning(f"Network policy {name} already exists")
+                return False
+            else:
+                raise
+
+    @staticmethod
+    def _build_egress_network_policy(
+        name: str,
+        pod_labels: Dict[str, str],
+        allow_all: bool,
+        allowlist: List[dict],
+        revision: Optional[str] = None,
+        owner_pod_name: Optional[str] = None,
+        owner_pod_uid: Optional[str] = None,
+    ) -> client.V1NetworkPolicy:
+        """Build a per-pod egress policy from normalized allowlist rules."""
+        if allow_all:
+            egress = [client.V1NetworkPolicyEgressRule()]
+        else:
+            egress = []
+            for rule in allowlist:
+                port = client.V1NetworkPolicyPort(
+                    protocol=rule["protocol"],
+                    port=rule["port_start"],
+                )
+                if rule["port_end"] != rule["port_start"]:
+                    port.end_port = rule["port_end"]
+                egress.append(
+                    client.V1NetworkPolicyEgressRule(
+                        to=[
+                            client.V1NetworkPolicyPeer(
+                                ip_block=client.V1IPBlock(cidr=rule["cidr"])
+                            )
+                        ],
+                        ports=[port],
+                    )
+                )
+
+        return client.V1NetworkPolicy(
+            metadata=client.V1ObjectMeta(
+                name=name,
+                annotations=(
+                    {"orchard.io/network-revision": revision}
+                    if revision
+                    else None
+                ),
+                owner_references=(
+                    [
+                        client.V1OwnerReference(
+                            api_version="v1",
+                            kind="Pod",
+                            name=owner_pod_name,
+                            uid=owner_pod_uid,
+                        )
+                    ]
+                    if owner_pod_name and owner_pod_uid
+                    else None
+                ),
+            ),
+            spec=client.V1NetworkPolicySpec(
+                pod_selector=client.V1LabelSelector(match_labels=pod_labels),
+                policy_types=["Egress"],
+                egress=egress,
+            ),
+        )
+
+    async def upsert_egress_network_policy(
+        self,
+        name: str,
+        namespace: str,
+        pod_labels: Dict[str, str],
+        allow_all: bool,
+        allowlist: List[dict],
+        revision: Optional[str] = None,
+        owner_pod_name: Optional[str] = None,
+        owner_pod_uid: Optional[str] = None,
+    ) -> None:
+        """Atomically create or replace a per-pod egress policy."""
+        networking_v1 = self._get_networking_v1_api()
+        policy = self._build_egress_network_policy(
+            name=name,
+            pod_labels=pod_labels,
+            allow_all=allow_all,
+            allowlist=allowlist,
+            revision=revision,
+            owner_pod_name=owner_pod_name,
+            owner_pod_uid=owner_pod_uid,
+        )
+        try:
+            existing = await self._k8s_call(
+                networking_v1.read_namespaced_network_policy,
+                name=name,
+                namespace=namespace,
+            )
+        except ApiException as e:
+            if e.status != 404:
+                raise
+            try:
+                await self._k8s_call(
+                    networking_v1.create_namespaced_network_policy,
+                    namespace=namespace,
+                    body=policy,
+                )
+                logger.info(f"Created network policy: {name} in {namespace}")
+                return
+            except Exception as create_error:
+                if revision and await self._network_policy_has_revision(
+                    name, namespace, revision
+                ):
+                    logger.info(
+                        f"Confirmed network policy {name} create after "
+                        "ambiguous response"
+                    )
+                    return
+                if isinstance(create_error, ApiException) and create_error.status == 409:
+                    raise NetworkPolicyConflictError(
+                        f"Network policy {name} changed concurrently"
+                    ) from create_error
+                raise
+
+        policy.metadata.resource_version = existing.metadata.resource_version
+        try:
+            await self._k8s_call(
+                networking_v1.replace_namespaced_network_policy,
+                name=name,
+                namespace=namespace,
+                body=policy,
+            )
+            logger.info(f"Replaced network policy: {name} in {namespace}")
+        except Exception as e:
+            if revision and await self._network_policy_has_revision(
+                name, namespace, revision
+            ):
+                logger.info(
+                    f"Confirmed network policy {name} replacement after "
+                    "ambiguous response"
+                )
+                return
+            if isinstance(e, ApiException) and e.status == 409:
+                raise NetworkPolicyConflictError(
+                    f"Network policy {name} changed concurrently"
+                ) from e
+            raise
+
+    async def create_egress_network_policy(
+        self,
+        name: str,
+        namespace: str,
+        pod_labels: Dict[str, str],
+        allow_all: bool,
+        allowlist: List[dict],
+        revision: str,
+        owner_pod_name: str,
+        owner_pod_uid: str,
+    ) -> bool:
+        """Create a managed policy and confirm ambiguous writes by revision."""
+        networking_v1 = self._get_networking_v1_api()
+        policy = self._build_egress_network_policy(
+            name=name,
+            pod_labels=pod_labels,
+            allow_all=allow_all,
+            allowlist=allowlist,
+            revision=revision,
+            owner_pod_name=owner_pod_name,
+            owner_pod_uid=owner_pod_uid,
+        )
+        try:
             await self._k8s_call(
                 networking_v1.create_namespaced_network_policy,
                 namespace=namespace,
                 body=policy,
             )
             logger.info(f"Created network policy: {name} in {namespace}")
-        except ApiException as e:
-            if e.status == 409:
-                logger.warning(f"Network policy {name} already exists")
-            else:
-                raise
+            return True
+        except Exception as e:
+            if await self._network_policy_has_revision(
+                name, namespace, revision
+            ):
+                logger.info(
+                    f"Confirmed network policy {name} create after "
+                    "ambiguous response"
+                )
+                return True
+            if isinstance(e, ApiException) and e.status == 409:
+                return False
+            raise
 
-    async def delete_network_policy(self, name: str, namespace: str) -> None:
+    async def _network_policy_has_revision(
+        self, name: str, namespace: str, revision: str
+    ) -> bool:
+        """Return whether a policy currently carries the expected revision."""
+        try:
+            current = await self.get_egress_network_policy(name, namespace)
+        except Exception:
+            return False
+        return bool(current and current.get("revision") == revision)
+
+    async def get_egress_network_policy(
+        self, name: str, namespace: str
+    ) -> Optional[dict]:
+        """Read a managed per-pod policy as a network configuration."""
+        try:
+            networking_v1 = self._get_networking_v1_api()
+            policy = await self._k8s_call(
+                networking_v1.read_namespaced_network_policy,
+                name=name,
+                namespace=namespace,
+            )
+        except ApiException as e:
+            if e.status == 404:
+                return None
+            raise
+
+        egress = policy.spec.egress or []
+        revision = (policy.metadata.annotations or {}).get(
+            "orchard.io/network-revision"
+        )
+        identity = {
+            "uid": policy.metadata.uid,
+            "resource_version": policy.metadata.resource_version,
+        }
+        if len(egress) == 1 and not egress[0].to and not egress[0].ports:
+            return {
+                "mode": "enabled",
+                "allowlist": [],
+                "revision": revision,
+                **identity,
+            }
+
+        allowlist = []
+        for egress_rule in egress:
+            peers = egress_rule.to or []
+            ports = egress_rule.ports or []
+            for peer in peers:
+                if not peer.ip_block:
+                    continue
+                for port in ports:
+                    port_start = int(port.port)
+                    allowlist.append(
+                        {
+                            "cidr": peer.ip_block.cidr,
+                            "protocol": port.protocol or "TCP",
+                            "port_start": port_start,
+                            "port_end": int(port.end_port or port_start),
+                        }
+                    )
+        return {
+            "mode": "restricted",
+            "allowlist": allowlist,
+            "revision": revision,
+            **identity,
+        }
+
+    async def delete_network_policy(
+        self,
+        name: str,
+        namespace: str,
+        uid: Optional[str] = None,
+        resource_version: Optional[str] = None,
+    ) -> None:
         """Delete a network policy."""
         try:
             networking_v1 = self._get_networking_v1_api()
+            preconditions = None
+            if uid or resource_version:
+                preconditions = client.V1Preconditions(
+                    uid=uid,
+                    resource_version=resource_version,
+                )
             await self._k8s_call(
                 networking_v1.delete_namespaced_network_policy,
                 name=name,
                 namespace=namespace,
+                body=client.V1DeleteOptions(preconditions=preconditions),
             )
             logger.info(f"Deleted network policy: {name} in {namespace}")
         except ApiException as e:
@@ -271,9 +539,9 @@ class K8sClient:
             else:
                 raise
 
-    async def list_sandbox_pods(self, namespace: str) -> set | None:
+    async def list_sandbox_pods(self, namespace: str) -> Optional[set]:
         """List all sandbox pod IDs in a namespace.
-
+        
         Returns set of sandbox IDs extracted from the 'sandbox-id' label,
         or None if the API call failed (callers must handle None to avoid
         mistakenly treating all pods as orphaned/missing).
@@ -283,7 +551,7 @@ class K8sClient:
             pods = await self._k8s_call(
                 core_v1.list_namespaced_pod,
                 namespace=namespace,
-                label_selector="app=sandbox",
+                label_selector="app=sandbox"
             )
             return {
                 pod.metadata.labels.get("sandbox-id")
@@ -297,11 +565,12 @@ class K8sClient:
             return None
 
     @staticmethod
-    def _build_startup_command(tools_mount_path: str | None) -> str:
+    def _build_startup_command(tools_mount_path: Optional[str]) -> str:
         """Build the sandbox container's entrypoint script.
 
         Starts the in-pod agent and keeps the container alive. When the sandbox
-        tools (`codex` / `claude` / `pi` / `opencode` / `hermes`) are mounted,
+        tools (`codex` / `claude` / `pi` / `opencode` / `hermes` / `mini`)
+        are mounted,
         they are published through three complementary paths, because different
         entry points into the container resolve commands differently:
 
@@ -327,20 +596,20 @@ class K8sClient:
         return (
             f'TOOLS="{tools_mount_path}"; '
             'if [ -d "$TOOLS/bin" ]; then '
-            "  mkdir -p /usr/local/bin 2>/dev/null; "
-            "  for t in codex claude pi opencode hermes; do "
+            '  mkdir -p /usr/local/bin 2>/dev/null; '
+            '  for t in codex claude pi opencode hermes mini; do '
             '    command -v "$t" >/dev/null 2>&1 && continue; '
             '    { printf \'#!/bin/sh\\nexec "%s/bin/%s" "$@"\\n\' "$TOOLS" "$t" '
             '        > "/usr/local/bin/$t" && chmod 0755 "/usr/local/bin/$t"; } '
-            "      2>/dev/null || true; "
-            "  done; "
+            '      2>/dev/null || true; '
+            '  done; '
             '  PATH="$PATH:$TOOLS/bin"; export PATH; '
             '  if [ -f "$TOOLS/profile.sh" ]; then '
-            "    mkdir -p /etc/profile.d 2>/dev/null && "
+            '    mkdir -p /etc/profile.d 2>/dev/null && '
             '    ln -sf "$TOOLS/profile.sh" /etc/profile.d/sandbox-tools.sh 2>/dev/null; '
-            "  fi; "
-            "fi; "
-            f"{agent_start}"
+            '  fi; '
+            'fi; '
+            f'{agent_start}'
         )
 
     async def create_pod(
@@ -348,24 +617,25 @@ class K8sClient:
         name: str,
         namespace: str,
         image: str,
-        command: list[str] | None = None,
+        command: Optional[List[str]] = None,
         cpu: str = "4",
         memory: str = "16Gi",
-        node_selector: dict[str, str] | None = None,
+        node_selector: Optional[Dict[str, str]] = None,
         working_dir: str = "/workspace",
-        sandbox_id: str | None = None,
-    ) -> None:
+        sandbox_id: Optional[str] = None,
+        generation: Optional[str] = None,
+    ) -> Optional[client.V1Pod]:
         """Create a pod.
-
+        
         Args:
             sandbox_id: If provided, used as the 'sandbox-id' label value.
                        Otherwise defaults to the pod name.
         """
         resources = client.V1ResourceRequirements(
             requests={"cpu": cpu, "memory": memory},
-            limits={"cpu": cpu, "memory": memory},
+            limits={"cpu": cpu, "memory": memory}
         )
-
+        
         # Agent probes — pod is "Ready" only when the in-pod agent responds to
         # /health.  The startupProbe covers the agent boot window after the
         # container starts (readiness/liveness are suppressed while it runs),
@@ -421,8 +691,8 @@ class K8sClient:
         volumes = [agent_volume]
         container_volume_mounts = [agent_volume_mount]
 
-        # Sandbox tools (`codex` / `claude`). Both are self-contained native
-        # binaries, so they work in ANY user image with no install step and no
+        # Sandbox tools (`codex` / `claude` / `pi` / `opencode` / `hermes` /
+        # `mini`). All use self-contained payloads, so they work in ANY user image with no install step and no
         # network access inside the sandbox.
         tools_mount_path = settings.sandbox_tools_mount_path
         tools_enabled = settings.enable_sandbox_tools
@@ -479,10 +749,8 @@ class K8sClient:
         container = client.V1Container(
             name="sandbox",
             image=image,
-            command=command
-            or [
-                "sh",
-                "-c",
+            command=command or [
+                "sh", "-c",
                 self._build_startup_command(
                     tools_mount_path if tools_enabled else None
                 ),
@@ -495,14 +763,17 @@ class K8sClient:
             readiness_probe=readiness_probe,
             volume_mounts=container_volume_mounts,
         )
-
+        
         # Add toleration for sandbox node taint
         tolerations = [
             client.V1Toleration(
-                key="workload", operator="Equal", value="sandbox", effect="NoSchedule"
+                key="workload",
+                operator="Equal",
+                value="sandbox",
+                effect="NoSchedule"
             )
         ]
-
+        
         pod_spec = client.V1PodSpec(
             init_containers=init_containers,
             containers=[container],
@@ -511,39 +782,67 @@ class K8sClient:
             node_selector=node_selector or {},
             tolerations=tolerations,
         )
-
+        
         pod = client.V1Pod(
             metadata=client.V1ObjectMeta(
-                name=name, labels={"app": "sandbox", "sandbox-id": sandbox_id or name}
+                name=name,
+                labels={"app": "sandbox", "sandbox-id": sandbox_id or name},
+                annotations=(
+                    {"orchard.io/sandbox-generation": generation}
+                    if generation
+                    else None
+                ),
             ),
-            spec=pod_spec,
+            spec=pod_spec
         )
-
+        
         try:
             core_v1 = self._get_core_v1_api()
-            await self._k8s_call(
-                core_v1.create_namespaced_pod, namespace=namespace, body=pod
+            created = await self._k8s_call(
+                core_v1.create_namespaced_pod,
+                namespace=namespace,
+                body=pod
             )
             logger.info(f"Created pod: {name} in {namespace}")
-        except ApiException as e:
-            if e.status == 409:
+            return created
+        except Exception as e:
+            if generation:
+                current = await self.get_pod(name, namespace)
+                current_generation = (
+                    (current.metadata.annotations or {}).get(
+                        "orchard.io/sandbox-generation"
+                    )
+                    if current
+                    else None
+                )
+                if current_generation == generation:
+                    logger.info(
+                        f"Confirmed pod {name} create after ambiguous response"
+                    )
+                    return current
+            if isinstance(e, ApiException) and e.status == 409:
                 logger.warning(f"Pod {name} already exists")
-            else:
-                raise
-
+                return None
+            raise
+    
     async def wait_pod_ready(
-        self, name: str, namespace: str, timeout: int = 300
+        self,
+        name: str,
+        namespace: str,
+        timeout: int = 300
     ) -> bool:
         """Wait for pod to be ready."""
         start_time = asyncio.get_event_loop().time()
-
+        
         while True:
             try:
                 core_v1 = self._get_core_v1_api()
                 pod = await self._k8s_call(
-                    core_v1.read_namespaced_pod, name=name, namespace=namespace
+                    core_v1.read_namespaced_pod,
+                    name=name,
+                    namespace=namespace
                 )
-
+                
                 if pod.status.phase == "Running":
                     # Check if all containers are ready
                     if pod.status.container_statuses:
@@ -553,44 +852,46 @@ class K8sClient:
                         if all_ready:
                             logger.info(f"Pod {name} is ready")
                             return True
-
+                
                 elif pod.status.phase in ["Failed", "Unknown"]:
                     logger.error(f"Pod {name} is in {pod.status.phase} state")
                     return False
-
+                
             except ApiException as e:
                 if e.status == 404:
                     logger.error(f"Pod {name} not found")
                     return False
                 raise
-
+            
             elapsed = asyncio.get_event_loop().time() - start_time
             if elapsed > timeout:
                 logger.error(f"Timeout waiting for pod {name} to be ready")
                 return False
-
+            
             await asyncio.sleep(2)
-
-    async def get_pod(self, name: str, namespace: str) -> client.V1Pod | None:
+    
+    async def get_pod(self, name: str, namespace: str) -> Optional[client.V1Pod]:
         """Get a pod by name and namespace.
-
+        
         Returns:
             V1Pod object or None if not found.
         """
         try:
             core_v1 = self._get_core_v1_api()
             pod = await self._k8s_call(
-                core_v1.read_namespaced_pod, name=name, namespace=namespace
+                core_v1.read_namespaced_pod,
+                name=name,
+                namespace=namespace
             )
             return pod
         except ApiException as e:
             if e.status == 404:
                 return None
             raise
-
+    
     async def has_network_policy(self, namespace: str, name: str) -> bool:
         """Check if a network policy exists in namespace.
-
+        
         Returns:
             True if network policy exists, False otherwise.
         """
@@ -599,39 +900,41 @@ class K8sClient:
             await self._k8s_call(
                 networking_v1.read_namespaced_network_policy,
                 name=name,
-                namespace=namespace,
+                namespace=namespace
             )
             return True
         except ApiException as e:
             if e.status == 404:
                 return False
             raise
-
+    
     async def check_pod_ready(self, name: str, namespace: str) -> bool:
         """Check if pod is ready (non-blocking, single check).
-
+        
         Returns:
             True if pod is running and all containers ready, False otherwise.
         """
         try:
             core_v1 = self._get_core_v1_api()
             pod = await self._k8s_call(
-                core_v1.read_namespaced_pod, name=name, namespace=namespace
+                core_v1.read_namespaced_pod,
+                name=name,
+                namespace=namespace
             )
-
+            
             if pod.status.phase == "Running":
                 if pod.status.container_statuses:
                     return all(cs.ready for cs in pod.status.container_statuses)
             return False
-
+            
         except ApiException as e:
             if e.status == 404:
                 return False
             raise
-
+    
     async def check_pod_status(self, name: str, namespace: str) -> dict:
         """Check pod status with scheduling details (non-blocking, single check).
-
+        
         Returns:
             Dict with keys: ready (bool), phase (str), status (str), message (str)
             status is one of: ready, pending, unschedulable, failed, not_found
@@ -639,70 +942,56 @@ class K8sClient:
         try:
             core_v1 = self._get_core_v1_api()
             pod = await self._k8s_call(
-                core_v1.read_namespaced_pod, name=name, namespace=namespace
+                core_v1.read_namespaced_pod,
+                name=name,
+                namespace=namespace
             )
-
+            
             phase = pod.status.phase or "Unknown"
-
+            
             if phase == "Running":
                 if pod.status.container_statuses:
                     all_ready = all(cs.ready for cs in pod.status.container_statuses)
                     if all_ready:
-                        return {
-                            "ready": True,
-                            "phase": phase,
-                            "status": "ready",
-                            "message": "",
-                        }
-                return {
-                    "ready": False,
-                    "phase": phase,
-                    "status": "pending",
-                    "message": "Containers not ready",
-                }
-
+                        return {"ready": True, "phase": phase, "status": "ready", "message": ""}
+                return {"ready": False, "phase": phase, "status": "pending", "message": "Containers not ready"}
+            
             if phase in ("Failed", "Unknown"):
                 message = ""
                 if pod.status.container_statuses:
                     for cs in pod.status.container_statuses:
                         if cs.state and cs.state.terminated:
                             message = cs.state.terminated.reason or ""
-                return {
-                    "ready": False,
-                    "phase": phase,
-                    "status": "failed",
-                    "message": message,
-                }
-
+                return {"ready": False, "phase": phase, "status": "failed", "message": message}
+            
             # Pending phase — check if unschedulable
             if pod.status.conditions:
                 for cond in pod.status.conditions:
                     if cond.type == "PodScheduled" and cond.status == "False":
                         if cond.reason == "Unschedulable":
                             return {
-                                "ready": False,
-                                "phase": phase,
+                                "ready": False, "phase": phase,
                                 "status": "unschedulable",
-                                "message": cond.message or "No nodes available",
+                                "message": cond.message or "No nodes available"
                             }
-
+            
             return {"ready": False, "phase": phase, "status": "pending", "message": ""}
-
+            
         except ApiException as e:
             if e.status == 404:
-                return {
-                    "ready": False,
-                    "phase": "NotFound",
-                    "status": "not_found",
-                    "message": "Pod not found",
-                }
+                return {"ready": False, "phase": "NotFound", "status": "not_found", "message": "Pod not found"}
             raise
-
+    
     async def delete_pod(
-        self, name: str, namespace: str, grace_period_seconds: int | None = None
+        self,
+        name: str,
+        namespace: str,
+        grace_period_seconds: Optional[int] = None,
+        uid: Optional[str] = None,
+        resource_version: Optional[str] = None,
     ) -> None:
         """Delete a pod.
-
+        
         Args:
             grace_period_seconds: Override the pod's default termination
                 grace period. Use 0 for immediate termination (SIGKILL).
@@ -711,12 +1000,17 @@ class K8sClient:
             delete_opts = client.V1DeleteOptions()
             if grace_period_seconds is not None:
                 delete_opts.grace_period_seconds = grace_period_seconds
+            if uid or resource_version:
+                delete_opts.preconditions = client.V1Preconditions(
+                    uid=uid,
+                    resource_version=resource_version,
+                )
             core_v1 = self._get_core_v1_api()
             await self._k8s_call(
                 core_v1.delete_namespaced_pod,
                 name=name,
                 namespace=namespace,
-                body=delete_opts,
+                body=delete_opts
             )
             logger.info(f"Deleted pod: {name} in {namespace}")
         except ApiException as e:
@@ -724,23 +1018,23 @@ class K8sClient:
                 logger.warning(f"Pod {name} not found")
             else:
                 raise
-
+    
     async def exec_command(
         self,
         pod_name: str,
         namespace: str,
-        command: list[str],
-        timeout: int | None = 300,
-        cwd: str | None = None,
-        env: dict[str, str] | None = None,
+        command: List[str],
+        timeout: Optional[int] = 300,
+        cwd: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
         login_shell: bool = False,
-    ) -> tuple[str, str, int]:
+    ) -> Tuple[str, str, int]:
         """
         Execute a command in a pod and return stdout, stderr, and exit code.
-
+        
         Uses the stderr channel exit code marker to reliably get the exit code.
         Implements robust timeout handling with process cleanup.
-
+        
         Args:
             timeout: Timeout in seconds. If None, no timeout is enforced (wait indefinitely).
                     If 0 or negative, uses default timeout of 300s.
@@ -752,9 +1046,7 @@ class K8sClient:
             # None means no timeout - wait indefinitely
             use_timeout = False
             timeout_seconds = 3600  # Still use a large value for k8s request timeout
-            logger.info(
-                f"Executing command in {pod_name} with no timeout (indefinite wait)"
-            )
+            logger.info(f"Executing command in {pod_name} with no timeout (indefinite wait)")
         elif timeout <= 0:
             # Invalid timeout - use default
             timeout_seconds = 300
@@ -763,99 +1055,89 @@ class K8sClient:
         else:
             timeout_seconds = timeout
             use_timeout = True
-
+        
         # Build the shell command
         shell_command_parts = []
-
+        
         # Change directory if needed
         if cwd:
             shell_command_parts.append(f"cd {cwd}")
-
+        
         # Set environment variables if needed
         if env:
             for key, value in env.items():
                 shell_command_parts.append(f"export {key}={value}")
-
+        
         # Add the actual command
         if isinstance(command, list):
             command = " ".join(command)
-
+        
         # Escape single quotes in the command for proper shell quoting
         # Replace ' with '\'' to safely embed in single-quoted string
         command_escaped = command.replace("'", "'\\''")
-
+        
         # Determine shell flag: -lc for login shell, -c for regular
         shell_flag = "-lc" if login_shell else "-c"
-
+        
         # Wrap command with timeout if enabled
         if use_timeout:
             # Use timeout command with SIGTERM, then SIGKILL after 5s grace period
-            shell_command_parts.append(
-                f"timeout --kill-after=5s {timeout_seconds}s bash {shell_flag} '{command_escaped}'"
-            )
+            shell_command_parts.append(f"timeout --kill-after=5s {timeout_seconds}s bash {shell_flag} '{command_escaped}'")
             timeout_with_buffer = timeout_seconds + 10
         else:
             # No timeout wrapping - run command directly
             shell_command_parts.append(f"bash {shell_flag} '{command_escaped}'")
             timeout_with_buffer = timeout_seconds
-
+        
         # Join with && and add exit code capture
         full_shell_command = " && ".join(shell_command_parts)
         full_shell_command += "; echo __EXIT_CODE__: $? >&2"
-
+        
         # Always use bash -c for the outer wrapper to avoid double login shell overhead.
         # The inner command already uses the appropriate shell_flag (bash -lc or bash -c).
         wrapped_command = ["bash", "-c", full_shell_command]
-
+        
         if use_timeout:
-            logger.info(
-                f"Executing command in {pod_name} with {timeout_seconds}s timeout: {wrapped_command}"
-            )
+            logger.info(f"Executing command in {pod_name} with {timeout_seconds}s timeout: {wrapped_command}")
         else:
-            logger.info(
-                f"Executing command in {pod_name} with no timeout: {wrapped_command}"
-            )
-
+            logger.info(f"Executing command in {pod_name} with no timeout: {wrapped_command}")
+        
         try:
             # Use asyncio.wait_for to enforce timeout at Python level (if timeout enabled)
             if use_timeout:
                 result = await asyncio.wait_for(
-                    self._do_exec(
-                        pod_name, namespace, wrapped_command, timeout_with_buffer
-                    ),
-                    timeout=timeout_with_buffer,
+                    self._do_exec(pod_name, namespace, wrapped_command, timeout_with_buffer),
+                    timeout=timeout_with_buffer
                 )
             else:
                 # No timeout enforcement at Python level
-                result = await self._do_exec(
-                    pod_name, namespace, wrapped_command, timeout_seconds
-                )
+                result = await self._do_exec(pod_name, namespace, wrapped_command, timeout_seconds)
             return result
-
-        except TimeoutError:
+            
+        except asyncio.TimeoutError:
             logger.error(f"Command timed out in {pod_name} after {timeout_seconds}s")
             # Try to kill any remaining processes (best effort)
             await self._cleanup_processes(pod_name, namespace)
             raise
-
+        
         except Exception as e:
             logger.error(f"Error executing command in {pod_name}: {e}")
             raise
-
+    
     def _do_exec_sync(
         self,
         pod_name: str,
         namespace: str,
-        wrapped_command: list[str],
+        wrapped_command: List[str],
         timeout: int,
-    ) -> tuple[str, str, int]:
+    ) -> Tuple[str, str, int]:
         """Synchronous method to execute command via Kubernetes stream.
-
+        
         This runs entirely in a thread to avoid blocking the asyncio event loop.
         The previous implementation only wrapped the stream() call in to_thread
         but left the blocking resp.update(timeout=1) read loop in the event loop,
         which serialized all concurrent exec operations.
-
+        
         Uses a short _request_timeout for the WebSocket connect handshake
         (not the command execution) so we fail fast if the API server is overloaded.
         The resp.update(timeout=1) loop handles reading with its own polling timeout.
@@ -877,33 +1159,33 @@ class K8sClient:
             _preload_content=False,
             _request_timeout=connect_timeout,
         )
-
+        
         stdout_data = []
         stderr_data = []
-
+        
         # Read from the stream until it closes
         while resp.is_open():
             resp.update(timeout=1)
-
+            
             if resp.peek_stdout():
                 stdout_data.append(resp.read_stdout())
-
+            
             if resp.peek_stderr():
                 stderr_data.append(resp.read_stderr())
-
+        
         # Ensure we read any remaining data after stream closes
         while resp.peek_stdout():
             stdout_data.append(resp.read_stdout())
-
+        
         while resp.peek_stderr():
             stderr_data.append(resp.read_stderr())
-
+        
         # Close the response
         resp.close()
-
+        
         stdout = "".join(stdout_data)
         stderr = "".join(stderr_data)
-
+        
         # Extract exit code from stderr
         exit_code = 0
         match = re.search(r"__EXIT_CODE__: (\d+)", stderr)
@@ -911,33 +1193,33 @@ class K8sClient:
             exit_code = int(match.group(1))
             # Remove the exit code marker from stderr
             stderr = re.sub(r"__EXIT_CODE__: \d+\n?", "", stderr)
-
+        
         # Check if command was killed by timeout (exit code 124 for timeout command)
         if exit_code == 124:
             logger.warning(f"Command in {pod_name} was terminated by timeout")
             stderr = f"Command timed out and was terminated\n{stderr}"
-
+        
         logger.info(
             f"Command completed in {pod_name}: exit_code={exit_code}, "
             f"stdout_len={len(stdout)}, stderr_len={len(stderr)}"
         )
-
+        
         return stdout, stderr, exit_code
 
     async def _do_exec(
         self,
         pod_name: str,
         namespace: str,
-        wrapped_command: list[str],
+        wrapped_command: List[str],
         timeout: int,
-    ) -> tuple[str, str, int]:
+    ) -> Tuple[str, str, int]:
         """Internal method to execute command via Kubernetes stream.
-
+        
         Runs the entire stream creation + read loop in a thread to avoid
         blocking the asyncio event loop during concurrent operations.
         Uses exec semaphore to limit concurrent WebSocket connections and
         retries on connection timeouts.
-
+        
         The semaphore is acquired PER ATTEMPT and released between retries.
         This prevents a single failing exec from monopolizing a semaphore
         slot during backoff sleep, leaving capacity for other execs.
@@ -947,28 +1229,18 @@ class K8sClient:
             try:
                 async with self._exec_semaphore:
                     return await asyncio.to_thread(
-                        self._do_exec_sync,
-                        pod_name,
-                        namespace,
-                        wrapped_command,
-                        timeout,
+                        self._do_exec_sync, pod_name, namespace, wrapped_command, timeout
                     )
             except ApiException as e:
                 err_str = str(e)
                 is_transient = (
-                    e.status == 0
-                    and any(
-                        kw in err_str
-                        for kw in (
-                            "Connection timed out",
-                            "RemoteDisconnected",
-                            "Connection aborted",
-                            "Connection reset",
-                        )
-                    )
+                    e.status == 0 and any(kw in err_str for kw in (
+                        'Connection timed out', 'RemoteDisconnected',
+                        'Connection aborted', 'Connection reset',
+                    ))
                 ) or e.status in self.RETRYABLE_STATUS_CODES
                 if is_transient and attempt < max_retries - 1:
-                    wait = (2**attempt) + random.uniform(0, 1)
+                    wait = (2 ** attempt) + random.uniform(0, 1)
                     logger.warning(
                         f"Exec connection to {pod_name} failed (attempt {attempt + 1}/{max_retries}), "
                         f"retrying in {wait:.1f}s: {e.reason}"
@@ -978,7 +1250,7 @@ class K8sClient:
                 raise
             except (TimeoutError, ConnectionError, OSError) as e:
                 if attempt < max_retries - 1:
-                    wait = (2**attempt) + random.uniform(0, 1)
+                    wait = (2 ** attempt) + random.uniform(0, 1)
                     logger.warning(
                         f"Exec connection to {pod_name} failed (attempt {attempt + 1}/{max_retries}), "
                         f"retrying in {wait:.1f}s: {e}"
@@ -986,7 +1258,7 @@ class K8sClient:
                     await asyncio.sleep(wait)
                     continue
                 raise
-
+    
     async def _cleanup_processes(
         self,
         pod_name: str,
@@ -1013,12 +1285,15 @@ class K8sClient:
             logger.info(f"Cleanup attempted for {pod_name}")
         except Exception as e:
             logger.warning(f"Failed to cleanup processes in {pod_name}: {e}")
-
-    async def get_namespace_creation_time(self, name: str) -> float | None:
+    
+    async def get_namespace_creation_time(self, name: str) -> Optional[float]:
         """Get namespace creation timestamp."""
         try:
             core_v1 = self._get_core_v1_api()
-            namespace = await self._k8s_call(core_v1.read_namespace, name=name)
+            namespace = await self._k8s_call(
+                core_v1.read_namespace,
+                name=name
+            )
             if namespace.metadata.creation_timestamp:
                 return namespace.metadata.creation_timestamp.timestamp()
             return None
@@ -1026,12 +1301,14 @@ class K8sClient:
             if e.status == 404:
                 return None
             raise
-
-    async def list_namespaces_with_prefix(self, prefix: str) -> list[str]:
+    
+    async def list_namespaces_with_prefix(self, prefix: str) -> List[str]:
         """List all namespaces with a given prefix."""
         try:
             core_v1 = self._get_core_v1_api()
-            namespaces = await self._k8s_call(core_v1.list_namespace)
+            namespaces = await self._k8s_call(
+                core_v1.list_namespace
+            )
             return [
                 ns.metadata.name
                 for ns in namespaces.items
@@ -1051,9 +1328,9 @@ class K8sClient:
     ) -> None:
         """
         Upload file content to a pod.
-
+        
         Uses base64 encoding to safely transfer binary data.
-
+        
         Args:
             pod_name: Name of the pod
             namespace: Namespace of the pod
@@ -1062,26 +1339,25 @@ class K8sClient:
             container: Container name
         """
         import base64
-
+        
         # Encode file content to base64
-        encoded_content = base64.b64encode(file_content).decode("utf-8")
-
+        encoded_content = base64.b64encode(file_content).decode('utf-8')
+        
         # Create directory if needed and write file
         # Use printf to avoid issues with special characters
         remote_dir = "/".join(remote_path.rsplit("/", 1)[:-1]) or "/"
-
+        
         # Build command to create dir and decode base64 to file
         command = [
-            "bash",
-            "-c",
-            f"mkdir -p '{remote_dir}' && echo '{encoded_content}' | base64 -d > '{remote_path}'",
+            "bash", "-c",
+            f"mkdir -p '{remote_dir}' && echo '{encoded_content}' | base64 -d > '{remote_path}'"
         ]
-
+        
         core_v1 = self._get_fresh_core_v1_api()
-
+        
         try:
             async with self._exec_semaphore:
-                await asyncio.to_thread(
+                resp = await asyncio.to_thread(
                     stream,
                     core_v1.connect_get_namespaced_pod_exec,
                     pod_name,
@@ -1107,25 +1383,25 @@ class K8sClient:
     ) -> bytes:
         """
         Download file content from a pod.
-
+        
         Uses base64 encoding to safely transfer binary data.
-
+        
         Args:
             pod_name: Name of the pod
             namespace: Namespace of the pod
             remote_path: Source path in the pod
             container: Container name
-
+            
         Returns:
             File content as bytes
         """
         import base64
-
+        
         # Read file and encode to base64
         command = ["bash", "-c", f"base64 '{remote_path}'"]
-
+        
         core_v1 = self._get_fresh_core_v1_api()
-
+        
         try:
             async with self._exec_semaphore:
                 resp = await asyncio.to_thread(
@@ -1140,14 +1416,12 @@ class K8sClient:
                     stdout=True,
                     tty=False,
                 )
-
+            
             # Decode base64 response
             content = base64.b64decode(resp.strip())
-            logger.info(
-                f"Downloaded file from {remote_path} in {pod_name}, size: {len(content)} bytes"
-            )
+            logger.info(f"Downloaded file from {remote_path} in {pod_name}, size: {len(content)} bytes")
             return content
-
+            
         except Exception as e:
             logger.error(f"Failed to download file from {pod_name}: {e}")
             raise
@@ -1158,28 +1432,27 @@ class K8sClient:
         namespace: str,
         remote_path: str,
         container: str = "sandbox",
-    ) -> list[dict[str, str]]:
+    ) -> List[Dict[str, str]]:
         """
         List files in a directory in the pod.
-
+        
         Args:
             pod_name: Name of the pod
             namespace: Namespace of the pod
             remote_path: Directory path in the pod
             container: Container name
-
+            
         Returns:
             List of file info dicts with name, type, size, modified
         """
         # Use ls with specific format for parsing
         command = [
-            "bash",
-            "-c",
-            f"ls -la --time-style=+%Y-%m-%dT%H:%M:%S '{remote_path}' 2>/dev/null || echo 'ERROR: Path not found'",
+            "bash", "-c",
+            f"ls -la --time-style=+%Y-%m-%dT%H:%M:%S '{remote_path}' 2>/dev/null || echo 'ERROR: Path not found'"
         ]
-
+        
         core_v1 = self._get_fresh_core_v1_api()
-
+        
         try:
             async with self._exec_semaphore:
                 resp = await asyncio.to_thread(
@@ -1194,39 +1467,37 @@ class K8sClient:
                     stdout=True,
                     tty=False,
                 )
-
+            
             if "ERROR:" in resp:
                 raise FileNotFoundError(f"Path not found: {remote_path}")
-
+            
             files = []
             for line in resp.strip().split("\n"):
                 # Skip header and total lines
                 if line.startswith("total") or not line.strip():
                     continue
-
+                    
                 parts = line.split()
                 if len(parts) >= 8:
                     perms = parts[0]
                     size = parts[4]
                     modified = parts[5]
                     name = " ".join(parts[6:])
-
+                    
                     # Skip . and ..
                     if name in [".", ".."]:
                         continue
-
+                    
                     file_type = "directory" if perms.startswith("d") else "file"
-                    files.append(
-                        {
-                            "name": name,
-                            "type": file_type,
-                            "size": size,
-                            "modified": modified,
-                        }
-                    )
-
+                    files.append({
+                        "name": name,
+                        "type": file_type,
+                        "size": size,
+                        "modified": modified,
+                    })
+            
             return files
-
+            
         except Exception as e:
             logger.error(f"Failed to list files in {pod_name}: {e}")
             raise
@@ -1250,20 +1521,20 @@ class K8sClient:
         """
         units = {
             "Ki": 1024,
-            "Mi": 1024**2,
-            "Gi": 1024**3,
-            "Ti": 1024**4,
+            "Mi": 1024 ** 2,
+            "Gi": 1024 ** 3,
+            "Ti": 1024 ** 4,
             "k": 1000,
-            "M": 1000**2,
-            "G": 1000**3,
-            "T": 1000**4,
+            "M": 1000 ** 2,
+            "G": 1000 ** 3,
+            "T": 1000 ** 4,
         }
         for suffix, multiplier in units.items():
             if value.endswith(suffix):
                 return int(float(value[: -len(suffix)]) * multiplier)
         return int(value)
 
-    async def get_cluster_resources(self) -> dict:
+    async def get_cluster_resources(self) -> Dict:
         """Return cluster-wide resource summary.
 
         Aggregates:
@@ -1296,13 +1567,11 @@ class K8sClient:
             total_allocatable_cpu += alloc_cpu
             total_allocatable_memory += alloc_mem
 
-            nodes.append(
-                {
-                    "name": node.metadata.name,
-                    "capacity": {"cpu": cap_cpu, "memory_bytes": cap_mem},
-                    "allocatable": {"cpu": alloc_cpu, "memory_bytes": alloc_mem},
-                }
-            )
+            nodes.append({
+                "name": node.metadata.name,
+                "capacity": {"cpu": cap_cpu, "memory_bytes": cap_mem},
+                "allocatable": {"cpu": alloc_cpu, "memory_bytes": alloc_mem},
+            })
 
         # --- Pods (sandbox namespace) ---
         sandbox_ns = settings.sandbox_namespace
@@ -1320,7 +1589,7 @@ class K8sClient:
 
         total_requested_cpu = 0.0
         total_requested_memory = 0
-        pod_resources: list[dict] = []
+        pod_resources: List[Dict] = []
 
         for pod in pods:
             phase = pod.status.phase if pod.status else "Unknown"
@@ -1329,7 +1598,7 @@ class K8sClient:
                 continue
             pod_cpu = 0.0
             pod_mem = 0
-            for container in pod.spec.containers or []:
+            for container in (pod.spec.containers or []):
                 requests = {}
                 if container.resources and container.resources.requests:
                     requests = container.resources.requests
@@ -1337,15 +1606,13 @@ class K8sClient:
                 pod_mem += self._parse_memory(requests.get("memory", "0"))
             total_requested_cpu += pod_cpu
             total_requested_memory += pod_mem
-            pod_resources.append(
-                {
-                    "name": pod.metadata.name,
-                    "namespace": sandbox_ns,
-                    "phase": phase,
-                    "cpu_request": pod_cpu,
-                    "memory_request_bytes": pod_mem,
-                }
-            )
+            pod_resources.append({
+                "name": pod.metadata.name,
+                "namespace": sandbox_ns,
+                "phase": phase,
+                "cpu_request": pod_cpu,
+                "memory_request_bytes": pod_mem,
+            })
 
         available_cpu = max(total_allocatable_cpu - total_requested_cpu, 0.0)
         available_memory = max(total_allocatable_memory - total_requested_memory, 0)

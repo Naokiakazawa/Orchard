@@ -1,0 +1,60 @@
+# Sanity check: replay SWE-bench Verified's own patches.
+#
+# The expected result is ~100% resolved. A materially lower number is a defect
+# in this suite or the cluster — not a property of any model — and it caps every
+# score you measure afterwards, so run this before trusting a benchmark number.
+#
+#   export SANDBOX_BASE_URL=... SANDBOX_API_KEY=...
+#   ./scripts/gold_patch_check.sh 50
+#
+# No model credentials are needed: nothing calls a model.
+
+run_name: gold-swebench-verified
+output_dir: ./results
+concurrency: 32
+max_retries: 2
+# Whole-rollout attempts when the pod is lost mid-instance (reaped, evicted).
+# This is the catch-all: any cluster fault the suite does not recognize still
+# earns every one of these pods.
+rollout_retries: 2
+# Attempts for a rollout that spent its whole budget instead of losing its pod.
+# Lower on purpose — a deadline is usually a property of the instance, and the
+# next pod spends the same half hour reaching the same wall. Not zero, because
+# a pod that dies in the last seconds of its budget looks exactly like one that
+# ran out of it, and one spare attempt is cheaper than dropping an instance
+# that would have scored. Raise to rollout_retries to treat them alike.
+timeout_retries: 1
+resume: true
+
+harness:
+  name: gold
+  # Seconds for the patch apply; no agent runs, so this needs no headroom.
+  timeout: 300
+  params:
+    # Apply the gold patch in the rollout pod and read it back with the same
+    # `git diff` a CLI harness goes through, so extraction is checked too.
+    # Set false to grade the dataset column verbatim.
+    extract: true
+
+model:
+  # Unused. Present so the run records what it was, which is nothing.
+  name: gold
+
+sandbox:
+  cpu: "2"
+  memory: "8Gi"
+  create_timeout: 600
+  command_timeout: 180
+  # Matches the agent configs: a baseline is only a baseline if the eval pods
+  # are set up the way a real run's are.
+  block_network: false
+  image_prefix: mirror.gcr.io/swebench
+  workdir: /testbed
+
+dataset:
+  name: swe-bench-verified
+  split: test
+
+grading:
+  enabled: true
+  eval_timeout: 1200

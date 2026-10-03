@@ -29,16 +29,18 @@ domains, and projects instead of being rebuilt for each new study.
 
 | Layer | What it is |
 | --- | --- |
-| **Recipes** | The research. Open SFT + RL recipes explored on top of the foundation — Orchard-SWE, Orchard-GUI, and Orchard-Claw — plus follow-on work such as OpenWebRL and OpenForge RL (see [News](#news)). |
+| **Recipes** | The research. Open SFT + RL recipes explored on top of the foundation — Orchard-SWE, Orchard-GUI, and Orchard-Claw — plus follow-on work such as OpenWebRL and OpenForge RL. Everything built on Orchard is indexed in [`projects/`](projects/). |
 | **Orchard Env** ([`orchard_env/`](orchard_env/)) | The foundation. A Kubernetes-native sandbox service + Python SDK that spins up thousands of isolated containers on demand and drives multi-turn agent ↔ sandbox interaction (exec, file I/O, git patches) over HTTP. |
-| **Trainer** ([`trainer/slime/`](trainer/slime/)) | RL training stack — a vendored [slime](https://github.com/THUDM/slime) fork with Orchard rollout code under [`examples/orchard/`](trainer/slime/examples/orchard/); fork-local changes tracked in [`ORCHARD_CHANGES.md`](trainer/slime/ORCHARD_CHANGES.md). |
+| **Orchard Eval** ([`orchard_eval/`](orchard_eval/)) | Evaluation. Runs any agent harness — `codex`, `pi`, `mini-swe-agent`, … — against SWE-bench Verified on Orchard Env sandboxes, graded by the official SWE-bench harness. See [Evaluation](#evaluation). |
+| **Trainer** (`trainer/slime/`) | RL training stack — a [slime](https://github.com/THUDM/slime) fork vendored as a git submodule ([MSR-Orchard/slime](https://github.com/MSR-Orchard/slime)), with Orchard rollout code under [`examples/orchard_swe/`](https://github.com/MSR-Orchard/slime/tree/main/examples/orchard_swe) and [`examples/orchard_gui/`](https://github.com/MSR-Orchard/slime/tree/main/examples/orchard_gui). See [Training](#training). |
 
 - 📄 **Paper:** [*Orchard: An Open-Source Agentic Modeling Framework*](https://arxiv.org/abs/2605.15040) (Peng et al., arXiv:2605.15040)
 - 🤗 **Research data:** [Hugging Face dataset](https://huggingface.co/datasets/microsoft/Orchard) — `swe` (107K SWE trajectories) and `gui` (3,070 multimodal browser-navigation rollouts) subsets
 
 ## News
 
-- **[2026-07] 🎉 We are excited to release [OpenForge RL](https://arxiv.org/abs/2607.21557)**,
+- **[2026-07] 🎉 We are excited to release [OpenForge RL](https://arxiv.org/abs/2607.21557)**
+  ([code](https://github.com/MSR-Orchard/OpenForge-RL) · [details](projects/openforge-rl.md)),
   which extends Orchard to train agents inside their *real deployment harnesses*
   — ZeroClaw, OpenClaw, Codex — instead of the simplified reimplementations open
   training stacks usually require, removing the train–deploy mismatch. A
@@ -52,7 +54,8 @@ domains, and projects instead of being rebuilt for each new study.
   OSWorld-Verified and **72.3** on WebVoyager; OpenForge-Claw (30B-A3B) reaches
   **33.7** on QwenClawBench and **28.1** on MCPAtlas.
 
-- **[2026-06] 🎉 We are excited to release [OpenWebRL](https://arxiv.org/abs/2606.02031)**,
+- **[2026-06] 🎉 We are excited to release [OpenWebRL](https://arxiv.org/abs/2606.02031)**
+  ([code](https://github.com/OpenWebRL/OpenWebRL) · [details](projects/openwebrl.md)),
   which extends Orchard-GUI into a full online multi-turn RL study on *live*
   websites — covering supervised initialization, multimodal context management,
   trajectory-level success judging, and multi-turn policy optimization. It builds
@@ -67,6 +70,20 @@ domains, and projects instead of being rebuilt for each new study.
 - **[2026-05] 📄 The [Orchard paper](https://arxiv.org/abs/2605.15040) is on arXiv**,
   introducing Orchard Env and the Orchard-SWE, Orchard-GUI, and Orchard-Claw
   research recipes.
+
+## Projects built on Orchard
+
+[`projects/`](projects/) indexes every project that builds on Orchard Env — the
+three recipes below plus follow-on work with its own papers and repositories.
+
+| Project | Domain | Paper | Code |
+| --- | --- | --- | --- |
+| [**OpenForge RL**](projects/openforge-rl.md) — training inside the *real* deployment harness | CLI/tool agents · computer use · browser | [arXiv:2607.21557](https://arxiv.org/abs/2607.21557) | [MSR-Orchard/OpenForge-RL](https://github.com/MSR-Orchard/OpenForge-RL) |
+| [**OpenWebRL**](projects/openwebrl.md) — online multi-turn RL on *live* websites | Browser use | [arXiv:2606.02031](https://arxiv.org/abs/2606.02031) | [OpenWebRL/OpenWebRL](https://github.com/OpenWebRL/OpenWebRL) |
+| **Orchard-SWE · Orchard-GUI · Orchard-Claw** | SWE · browser · CLI/tool agents | [arXiv:2605.15040](https://arxiv.org/abs/2605.15040) | [`trainer/slime/`](https://github.com/MSR-Orchard/slime) |
+
+Built something on Orchard Env? See
+[Adding your project](projects/README.md#adding-your-project).
 
 ## Recipes
 
@@ -149,6 +166,72 @@ build and push images, deploy, smoke-test — in about 20 minutes:
 short path, [orchard_env/docs/deployment.md](orchard_env/docs/deployment.md) for
 every configuration knob, non-Azure clusters, and cost estimates.
 
+### Evaluation
+
+[`orchard_eval/`](orchard_eval/) runs a benchmark against Orchard Env — one sandbox
+per task instance, graded by the official SWE-bench harness. The benchmark, the
+environment, and the agent harness are separate layers, so switching the agent
+you are measuring is a one-line change rather than a new image or a new runner:
+
+```bash
+# Both in one command: orchard-eval depends on orchard-env, which is a path in
+# this repository rather than a package on PyPI.
+pip install -e orchard_env -e "orchard_eval[swebench]"
+
+export SANDBOX_BASE_URL="http://your-orchestrator-host"
+export SANDBOX_API_KEY="your-api-key"
+export OPENAI_API_KEY="sk-..."
+
+orchard-eval run -c orchard_eval/configs/codex.yaml --limit 5   # smoke test
+orchard-eval run -c orchard_eval/configs/codex.yaml             # SWE-bench Verified
+orchard-eval run -c orchard_eval/configs/pi.yaml
+orchard-eval run -c orchard_eval/configs/mini-swe-agent.yaml
+```
+
+This is the same "any harness" property the environment layer is built for.
+`codex`, `claude`, `pi`, `opencode`, `hermes` and `mini` are already on `PATH`
+in every sandbox, so evaluating any of them costs one `exec` — nothing is
+installed at run time and the whole agent loop stays on the pod. Every harness
+emits a full
+turn-by-turn **trajectory** (normalized, plus the raw event stream) for
+distillation and RL, runs are resumable, results land in SWE-bench's own
+prediction format for independent re-grading, and infrastructure failures are
+separated from agent failures so a flaky cluster never quietly depresses a
+score. See [orchard_eval/README.md](orchard_eval/README.md).
+
+### Training
+
+The trainer is a **git submodule**, so a plain `git clone` leaves `trainer/slime/`
+empty:
+
+```bash
+git clone --recursive https://github.com/microsoft/Orchard-Agentic.git
+
+# already cloned without --recursive?
+git submodule update --init trainer/slime
+```
+
+Rollout code, reward functions, and launch scripts for each recipe live in the
+fork:
+
+| Recipe | Directory |
+| --- | --- |
+| **Orchard-SWE** | [`examples/orchard_swe/`](https://github.com/MSR-Orchard/slime/tree/main/examples/orchard_swe) |
+| **Orchard-GUI** | [`examples/orchard_gui/`](https://github.com/MSR-Orchard/slime/tree/main/examples/orchard_gui) |
+
+**Hardware.** The two layers have very different requirements, and they scale
+independently — run them on separate node pools.
+
+- **Orchard Env is CPU-only.** Sandbox nodes need no GPUs. The reference AKS
+  deployment uses `Standard_D8as_v5`, and the paper's 128-sandbox fleet ran on
+  17 × `Standard_D16ads_v5` (16 vCPU / 64 GiB), with the sandbox pool on spot
+  instances.
+- **The trainer needs GPUs.** `examples/orchard_swe/b200_config/` ships 1-node and
+  2-node Kubernetes job specs for Qwen3.5-35B-A3B, each node requesting **8 ×
+  B200, 104 vCPU, 2880 GiB RAM, and 8 RDMA devices**. Upstream slime officially
+  supports H100/H200 and B200; the training stack is Megatron-LM with SGLang
+  rollout under Ray.
+
 **Beyond hello-world** — async client, file I/O, git patches, PTY sessions, and
 per-sandbox resource limits: [SDK reference](orchard_env/docs/sdk.md) ·
 [REST API](orchard_env/docs/api.md) · [architecture](orchard_env/docs/architecture.md) ·
@@ -157,14 +240,14 @@ per-sandbox resource limits: [SDK reference](orchard_env/docs/sdk.md) ·
 **Exploring a new recipe on Orchard Env?** The REST API
 ([docs/api.md](orchard_env/docs/api.md)) is the contract and the SDK is a thin
 client over it, so a project in any language can depend on the same substrate.
-Open a PR to add it to the recipe table above.
+Open a PR to add it to [`projects/`](projects/).
 
 ## Paper & dataset
 
 The foundation and the three recipes above are described in
 [**Orchard: An Open-Source Agentic Modeling Framework**](https://arxiv.org/abs/2605.15040)
 (Peng et al., arXiv:2605.15040). OpenWebRL and OpenForge RL are separate papers
-that build on the same environment layer — see [News](#news).
+that build on the same environment layer — see [`projects/`](projects/).
 
 - 📄 Paper: [arXiv:2605.15040](https://arxiv.org/abs/2605.15040)
 - 🤗 Research data: [Hugging Face dataset](https://huggingface.co/datasets/microsoft/Orchard) — one repository ships two parallel subsets, both produced inside the same Orchard Env sandbox infrastructure:

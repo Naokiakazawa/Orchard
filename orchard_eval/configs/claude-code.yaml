@@ -1,0 +1,108 @@
+# SWE-bench Verified with Anthropic's Claude Code.
+#
+# Like codex and pi, the `claude` CLI ships inside every Orchard Env sandbox:
+#
+#   export MODEL_NAME=... MODEL_BASE_URL=... API_KEY=...
+#   export SANDBOX_BASE_URL=... SANDBOX_API_KEY=...
+#   orchard-eval run -c configs/claude-code.yaml
+#
+# Unlike the others, Claude Code does not speak OpenAI chat-completions. It
+# posts to {ANTHROPIC_BASE_URL}/v1/messages — the Anthropic Messages API. That
+# needs no translation layer here, because the sglang build this suite pins
+# (lmsysorg/sglang:v0.5.18) serves that API natively alongside the OpenAI one
+# and scripts/session_router.py relays whatever path it is handed. It does mean
+# the endpoint and the credential are spelled differently, which the harness
+# handles: ANTHROPIC_BASE_URL drops the /v1 that model.base_url keeps, and the
+# key goes in ANTHROPIC_AUTH_TOKEN (a bearer token) rather than
+# ANTHROPIC_API_KEY (an X-Api-Key header sglang does not read).
+
+run_name: claude-code-swebench-verified
+output_dir: ./results
+concurrency: 32
+max_retries: 2
+# Whole-rollout attempts when the pod is lost mid-instance (reaped, evicted).
+rollout_retries: 2
+# Attempts for a rollout that spent its whole budget instead of losing its pod.
+# Lower on purpose — see configs/pi.yaml for the reasoning.
+timeout_retries: 1
+resume: true
+
+harness:
+  name: claude-code
+  # Twice what mini-swe-agent, pi, and codex get (1800). Worth knowing when
+  # reading a claude-code column next to theirs: part of any gap is the extra
+  # hour, not the harness. Drop this to 1800 to remove that variable, at the
+  # cost of more rollouts ending on the deadline.
+  timeout: 3600
+  params:
+    extra_args: []
+    # Stop the CLI 60s before harness.timeout, from inside the sandbox, so the
+    # exec returns through its ordinary path with the transcript and the
+    # working tree intact. Losing that race costs the whole rollout, not just
+    # its tail: the stream is abandoned rather than drained, so neither the
+    # stdout mirror nor `git diff` can recover anything. See configs/pi.yaml.
+    timeout_margin: 60
+    # Output-token cap (CLAUDE_CODE_MAX_OUTPUT_TOKENS). Matched to pi's default
+    # so a claude-code score and a pi score on the same benchmark are
+    # comparable — a cap that differs between harnesses is the difference the
+    # comparison would actually be measuring.
+    max_tokens: 16384
+    # Extended-thinking budget (MAX_THINKING_TOKENS). Zero on purpose:
+    # sglang's Anthropic adapter rejects `redacted_thinking` in history
+    # outright, and under `--reasoning-parser qwen3` it emits thinking blocks
+    # with no signature, which Claude Code replays verbatim on the next turn.
+    # Not requesting extended thinking avoids that whole failure class, and
+    # mirrors pi, which turns `reasoning_effort` off for these same servers.
+    # The model still reasons server-side; only the request parameter goes.
+    max_thinking_tokens: 0
+    # Reasoning effort (`--effort`) for the runs that do NOT go through the
+    # session router. It is named `effort_fallback` rather than `effort`
+    # because under the router it is not the level the model runs at: the
+    # router deletes `output_config.effort` from every request
+    # (scripts/session_router.py), which puts Qwen3.8-27B on its chat
+    # template's own default('xhigh') branch — the level pi, mini-swe-agent and
+    # codex already run at, and one no value here can reach. Read `xhigh`, not
+    # `medium`, as what a `MODEL_ROUTING=session` rollout actually does.
+    #
+    # Why the flag is pinned at all. Claude Code sends output_config.effort on
+    # every request and offers no way not to; absent the flag it sends "high".
+    # sglang forwards the level as chat-completions `reasoning_effort` — with
+    # the CLI's "xhigh" rewritten to "max" on the way — and the template raises
+    # on any level but xhigh/medium/low, an uncaught jinja error that surfaces
+    # as HTTP 500. So on the unrouted paths (a sticky MODEL_ROUTING, an engine
+    # addressed directly, --no-strip-effort) an unpinned CLI fails its very
+    # first request, burns its ten retries, and ends the rollout with an empty
+    # patch and status=agent_error. `medium` is the highest level that survives
+    # there, and it injects no reasoning instruction at all.
+    #
+    # Set to "" to drop the flag on an endpoint that takes the CLI's default.
+    effort_fallback: medium  # unrouted paths only; the router runs at xhigh
+
+model:
+  # MODEL_NAME is the bare served id with no provider prefix. It is what goes
+  # into `--model` and into every ANTHROPIC_DEFAULT_*_MODEL alias — Claude Code
+  # resolves background work (compaction, titles) and subagents through those
+  # independently of `--model`, so leaving them unset sends part of every
+  # rollout to a model id this fleet does not serve.
+  name: ${MODEL_NAME}
+  base_url: ${MODEL_BASE_URL}
+  api_key_env: API_KEY
+
+sandbox:
+  # base_url and api_key come from SANDBOX_BASE_URL / SANDBOX_API_KEY.
+  cpu: "2"
+  memory: "8Gi"
+  create_timeout: 600
+  command_timeout: 180
+  # The CLI calls the model from inside the pod, so egress is required.
+  block_network: false
+  image_prefix: mirror.gcr.io/swebench
+  workdir: /testbed
+
+dataset:
+  name: swe-bench-verified
+  split: test
+
+grading:
+  enabled: true
+  eval_timeout: 1200

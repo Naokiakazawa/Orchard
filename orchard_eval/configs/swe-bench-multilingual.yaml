@@ -1,0 +1,33 @@
+# Overlay that points any agent config at SWE-bench Multilingual.
+#
+# Layer it *after* the harness config, so its settings win:
+#
+#   orchard-eval run -c configs/mini-swe-agent.yaml -c configs/swe-bench-multilingual.yaml
+#   orchard-eval run -c configs/codex.yaml          -c configs/swe-bench-multilingual.yaml
+#
+# Multilingual is an ordinary SWE-bench dataset — same image naming, same
+# /testbed workdir, same official grading — so the only thing that really
+# changes is the cost. Its repos build with cargo, gradle, go and npm rather
+# than `pip install -e .`, and a cold test run is minutes rather than seconds.
+#
+# Needs `swebench >= 5.0`: the eval script is a dataset column here, and the
+# legacy princeton-nlp datasets have no multilingual split to fall back to.
+
+dataset:
+  name: swe-bench-multilingual
+  split: test
+  benchmark: swe-bench
+
+sandbox:
+  # Compiled-language toolchains are memory-hungry; a Rust or Java test run on
+  # 2 CPUs / 8Gi is what turns a passing suite into an EVAL_TIMEOUT.
+  cpu: "4"
+  memory: "16Gi"
+  create_timeout: 600
+  command_timeout: 300
+
+harness:
+  timeout: 1800
+
+grading:
+  eval_timeout: 1200
