@@ -1,0 +1,64 @@
+# Sanity check: replay SWE-bench Pro's own patches.
+#
+# The expected result is ~100% resolved. A materially lower number is a defect
+# in this suite or the cluster — not a property of any model — and it caps every
+# score you measure afterwards, so run this before trusting a benchmark number.
+#
+#   export SANDBOX_BASE_URL=... SANDBOX_API_KEY=...
+#   python scripts/gold_patch_check.py --benchmark pro --limit 20
+#
+# No model credentials are needed: nothing calls a model.
+
+run_name: gold-swebench-pro
+output_dir: ./results
+concurrency: 16
+max_retries: 2
+# Whole-rollout attempts when the pod is lost mid-instance (reaped, evicted).
+# This is the catch-all: any cluster fault the suite does not recognize still
+# earns every one of these pods.
+rollout_retries: 2
+# Attempts for a rollout that spent its whole budget instead of losing its pod.
+# Lower on purpose — a deadline is usually a property of the instance, and the
+# next pod spends the same half hour reaching the same wall. Not zero, because
+# a pod that dies in the last seconds of its budget looks exactly like one that
+# ran out of it, and one spare attempt is cheaper than dropping an instance
+# that would have scored. Raise to rollout_retries to treat them alike.
+timeout_retries: 1
+resume: true
+
+harness:
+  name: gold
+  # Applying a patch to a large monorepo, then reading it back.
+  timeout: 900
+  params:
+    # Apply the gold patch in the rollout pod and read it back with the same
+    # `git diff` a CLI harness goes through, so extraction is checked too.
+    # Set false to grade the dataset column verbatim.
+    extract: true
+
+model:
+  # Unused. Present so the run records what it was, which is nothing.
+  name: gold
+
+sandbox:
+  cpu: "4"
+  memory: "16Gi"
+  create_timeout: 600
+  command_timeout: 600
+  block_network: false
+  image_prefix: mirror.gcr.io/jefzda
+  workdir: /app
+
+dataset:
+  name: swe-bench-pro
+  split: test
+  benchmark: swe-bench-pro
+  # Must match configs/swebench-pro.yaml, or this ceiling is measured against a
+  # different benchmark than the runs it is meant to bound. See that file.
+  revision: v1.0
+
+grading:
+  enabled: true
+  eval_timeout: 1200
+  pro_scripts_dir: ""
+  pro_scripts_ref: ca10a60a

@@ -1,0 +1,66 @@
+# Overlay that turns any agent config into a SWE-bench Pro run.
+#
+# Layer it *after* the harness config, so its sandbox settings win:
+#
+#   orchard-eval run -c configs/mini-swe-agent.yaml -c configs/swebench-pro.yaml
+#   orchard-eval run -c configs/codex.yaml -c configs/swebench-pro.yaml
+#   orchard-eval run -c configs/pi.yaml    -c configs/swebench-pro.yaml
+#
+# Everything here is a property of the benchmark, not of the agent:
+#
+# * the images live in one Docker Hub repository (`jefzda/sweap-images`) tagged
+#   per instance, not in SWE-bench's `sweb.eval.<arch>.<instance>` layout;
+# * the repository is checked out at /app, not /testbed;
+# * the tasks are long-horizon and the repos are large (element-web, teleport,
+#   webclients), so both the agent and the test command need more room and more
+#   time than SWE-bench Verified does.
+#
+# The two upstream refs below are pinned to the benchmark as it stood before
+# ScaleAI published V2 on 2026-09-22. Unpinned, `main` silently swaps the
+# benchmark underneath a run: V2 took over the HuggingFace `default` config at
+# 642 tasks rather than 731, and moved its images to
+# ghcr.io/scaleapi/swe-bench_pro-v2 in a new `docker_image` column that
+# overrides sandbox.image_prefix below. Every task V2 kept also had its
+# problem_statement, requirements, interface, fail_to_pass and
+# before_repo_set_cmd rewritten, so V2 numbers are not comparable to V1 numbers
+# even on the 642 instance ids the two share.
+#
+# The Harbor path (scripts/run_swebench_pro_harbor.sh) is a separate pin and did
+# not move: upstream ships V2's Harbor tasks as a directory in its own git
+# repository, not as a Hub dataset. Adopting V2 is a deliberate re-baseline of
+# both paths at once, and means re-measuring the gold and no-patch ceilings
+# (configs/gold-pro.yaml, configs/noop-pro.yaml) before trusting a score.
+
+dataset:
+  name: swe-bench-pro
+  split: test
+  benchmark: swe-bench-pro
+  # Tag `v1.0` is the 731-task V1 data, preserved byte-identical by upstream.
+  revision: v1.0
+
+sandbox:
+  image_prefix: mirror.gcr.io/jefzda
+  workdir: /app
+  # `npm ci` on a monorepo and `go build ./...` are the common build steps.
+  cpu: "4"
+  memory: "16Gi"
+  # These images are several GB; first pull on a cold node is slow.
+  create_timeout: 600
+  command_timeout: 300
+
+harness:
+  # Pro's tasks take substantially more turns than Verified's.
+  timeout: 2400
+
+grading:
+  # Whole test suites for JS/Go monorepos, not a handful of pytest files.
+  eval_timeout: 1200
+  # Per-instance run_script.sh / parser.py. Empty downloads them from
+  # scaleapi/SWE-bench_Pro-os and caches them under
+  # ~/.cache/orchard-eval/swebench-pro/<ref>. Point this at a local checkout's
+  # `run_scripts/` directory for an offline, pinned run.
+  pro_scripts_dir: ""
+  # Pinned to the last pre-V2 commit on scaleapi/SWE-bench_Pro-os. The V2
+  # release added a `v2/` tree rather than editing `run_scripts/`, but `main`
+  # is a moving ref and these scripts decide what counts as a pass.
+  pro_scripts_ref: ca10a60a

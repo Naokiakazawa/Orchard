@@ -21,10 +21,13 @@ if [ -z "${ACR_NAME:-}" ]; then
     ACR_NAME="REPLACE_WITH_YOUR_ACR"
 fi
 
+TOOLS_TAG="${TOOLS_TAG:-latest}"
+
 echo "============================================"
 echo "Deploy Orchestrator to Kubernetes"
 echo "============================================"
 echo "ACR: $ACR_NAME"
+echo "Sandbox tools tag: $TOOLS_TAG"
 echo "============================================"
 echo ""
 
@@ -54,7 +57,10 @@ TEMP_DEPLOYMENT=$(mktemp)
 TEMP_CONFIGMAP=$(mktemp)
 TEMP_REDIS=$(mktemp)
 sed "s/\${ACR_NAME}/$ACR_NAME/g" k8s/deployment.yaml > "$TEMP_DEPLOYMENT"
-sed "s/\${ACR_NAME}/$ACR_NAME/g" k8s/configmap.yaml > "$TEMP_CONFIGMAP"
+sed \
+    -e "s/\${ACR_NAME}/$ACR_NAME/g" \
+    -e "s/\${TOOLS_TAG}/$TOOLS_TAG/g" \
+    k8s/configmap.yaml > "$TEMP_CONFIGMAP"
 sed "s/\${ACR_NAME}/$ACR_NAME/g" k8s/redis.yaml > "$TEMP_REDIS"
 echo "✓ Templates processed"
 echo ""

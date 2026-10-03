@@ -1,4 +1,4 @@
-"""End-to-end check: the bundled agent harnesses are available in a fresh sandbox.
+"""End-to-end check: the bundled agent CLIs are available in a fresh sandbox.
 
 Requires a running orchestrator plus SANDBOX_BASE_URL / SANDBOX_API_KEY, e.g.
 
@@ -16,8 +16,9 @@ from orchard_env import SandboxClient
 IMAGE = os.environ.get("TEST_IMAGE", "ubuntu:22.04")
 
 # Every CLI the sandbox-tools image is expected to publish.
-TOOLS = ["codex", "claude", "pi", "opencode", "hermes"]
-VERSION_CMD = " && ".join(f"{t} --version" for t in TOOLS)
+TOOLS = ["codex", "claude", "pi", "opencode", "hermes", "mini"]
+PROBES = {tool: "--version" for tool in TOOLS}
+PROBES["mini"] = "--help"
 
 checks = []
 
@@ -32,13 +33,23 @@ with SandboxClient() as client:
     sb = client.create_sandbox(image=IMAGE, block_network=True)
     print(f"sandbox ready: {sb.sandbox_id}\n")
 
-    # 1. Non-login shell (default exec path)
-    r = sb.exec(VERSION_CMD, timeout=180)
-    record("non-login shell", r.succeeded, r.stdout.strip() or r.stderr.strip()[:200])
+    # 1. Exercise each wrapper independently so one failure does not mask the rest.
+    for tool, probe in PROBES.items():
+        r = sb.exec(f"{tool} {probe}", timeout=180)
+        record(
+            f"{tool} non-login shell",
+            r.succeeded,
+            (r.stdout.strip() or r.stderr.strip())[:200],
+        )
 
     # 2. Login shell (bash --login -i, used by login_shell=True)
-    r = sb.exec(VERSION_CMD, timeout=180, login_shell=True)
-    record("login shell", r.succeeded, r.stdout.strip() or r.stderr.strip()[:200])
+    for tool, probe in PROBES.items():
+        r = sb.exec(f"{tool} {probe}", timeout=180, login_shell=True)
+        record(
+            f"{tool} login shell",
+            r.succeeded,
+            (r.stdout.strip() or r.stderr.strip())[:200],
+        )
 
     # 3. Every tool resolves on PATH
     r = sb.exec("; ".join(f"command -v {t}" for t in TOOLS), timeout=30)
@@ -100,16 +111,17 @@ with SandboxClient() as client:
 
     # 10. Reachable from `kubectl exec`, which starts a process from the IMAGE's
     #     own PATH and never sees anything the entrypoint exported.
-    r = sb.exec(
-        "IMGPATH=$(tr '\\0' '\\n' < /proc/1/environ | grep '^PATH=' | cut -d= -f2-); "
-        f"env -i PATH=\"$IMGPATH\" sh -c '{VERSION_CMD}'",
-        timeout=180,
-    )
-    record(
-        "reachable from kubectl exec",
-        r.succeeded,
-        r.stdout.strip() or r.stderr.strip()[:200],
-    )
+    for tool, probe in PROBES.items():
+        r = sb.exec(
+            "IMGPATH=$(tr '\\0' '\\n' < /proc/1/environ | grep '^PATH=' | cut -d= -f2-); "
+            f"env -i PATH=\"$IMGPATH\" sh -c '{tool} {probe}'",
+            timeout=180,
+        )
+        record(
+            f"{tool} reachable from kubectl exec",
+            r.succeeded,
+            (r.stdout.strip() or r.stderr.strip())[:200],
+        )
 
     # 11. The baked-in version manifest is readable for debugging
     r = sb.exec("cat /opt/sandbox-tools/VERSIONS", timeout=30)

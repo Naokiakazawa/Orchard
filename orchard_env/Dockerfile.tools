@@ -5,15 +5,15 @@
 #   pi        earendil-works/pi         (GitHub release, native ELF, GLIBC_2.17)
 #   opencode  OpenCode                  (npm, native ELF, GLIBC_2.17)
 #   hermes    Nous Research Hermes      (PyPI + relocatable standalone CPython)
+#   mini      SWE-agent mini-swe-agent  (PyPI + relocatable standalone CPython)
 #
 # Every payload here is self-contained and needs NO install step, NO network
-# access and NO runtime (Node.js / Python) inside the sandbox. Each one was
-# verified to run on glibc 2.17+ — i.e. CentOS 7 and newer — which covers every
-# realistic sandbox image, including all SWE-bench images (Ubuntu 22.04).
+# access and NO runtime (Node.js / Python) inside the sandbox. Dynamically
+# linked glibc payloads use a private Debian runtime, including on musl images
+# such as Alpine.
 #
 # CLIs whose payload requires GLIBC_2.28 (GitHub Copilot, Cursor Agent, Gemini)
-# are deliberately NOT bundled: supporting them needs a patchelf'd private glibc,
-# which is a materially larger blast radius for little gain here.
+# are deliberately NOT bundled.
 #
 # Everything is relocatable — nothing hardcodes the mount path — so the payload
 # works no matter where the orchestrator mounts it.
@@ -37,6 +37,7 @@
 #     --build-arg OPENCODE_VERSION=1.18.7 \
 #     --build-arg PI_VERSION=v0.82.1 \
 #     --build-arg HERMES_VERSION=0.19.0 \
+#     --build-arg MINI_SWE_AGENT_VERSION=2.4.6 \
 #     -t <acr>/sandbox-tools:latest .
 #
 
@@ -99,6 +100,28 @@ RUN set -eux; \
     test -x /payload/pi/pi; \
     rm -rf /payload/pi/docs /payload/pi/examples /payload/pi/CHANGELOG.md
 
+# ───────────────────────── private glibc runtime ─────────────────────────────
+FROM debian:12-slim AS glibctools
+
+# Keep the runtime private to the wrappers. Nothing is installed into the
+# sandbox image and LD_LIBRARY_PATH is never exported to child processes.
+RUN set -eux; \
+    mkdir -p /payload/glibc; \
+    cp -L \
+        /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 \
+        /lib/x86_64-linux-gnu/libc.so.6 \
+        /lib/x86_64-linux-gnu/libm.so.6 \
+        /lib/x86_64-linux-gnu/libdl.so.2 \
+        /lib/x86_64-linux-gnu/libpthread.so.0 \
+        /lib/x86_64-linux-gnu/libresolv.so.2 \
+        /lib/x86_64-linux-gnu/libnss_dns.so.2 \
+        /lib/x86_64-linux-gnu/libnss_files.so.2 \
+        /lib/x86_64-linux-gnu/libutil.so.1 \
+        /lib/x86_64-linux-gnu/librt.so.1 \
+        /lib/x86_64-linux-gnu/libgcc_s.so.1 \
+        /usr/lib/x86_64-linux-gnu/libstdc++.so.6 \
+        /payload/glibc/
+
 # ─────────────────────── hermes (PyPI + standalone Python) ───────────────────
 FROM python:3.11-slim AS hermestools
 
@@ -127,6 +150,33 @@ RUN set -eux; \
     test -f /payload/hermes/python/bin/hermes; \
     find /payload/hermes -name '__pycache__' -type d -prune -exec rm -rf {} + || true
 
+# ─────────────────── mini-swe-agent (PyPI + standalone Python) ───────────────
+FROM python:3.11-slim AS minitools
+
+ARG MINI_SWE_AGENT_VERSION=2.4.6
+ARG PYTHON_STANDALONE_URL=https://github.com/astral-sh/python-build-standalone/releases/download/20260718/cpython-3.11.15%2B20260718-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir uv
+
+# Same relocatable-interpreter recipe as hermes above, and for the same reason:
+# mini is a Python package, and no sandbox image can be assumed to have a Python
+# that is both new enough and safe to install into (the SWE-bench images' conda
+# env IS the package under test).
+RUN set -eux; \
+    mkdir -p /payload/mini; \
+    curl -fsSL -o /tmp/python.tar.gz "${PYTHON_STANDALONE_URL}"; \
+    tar xzf /tmp/python.tar.gz -C /payload/mini; \
+    rm /tmp/python.tar.gz; \
+    test -x /payload/mini/python/bin/python3; \
+    uv pip install --no-cache \
+        --python /payload/mini/python/bin/python3 \
+        "mini-swe-agent==${MINI_SWE_AGENT_VERSION}"; \
+    test -f /payload/mini/python/bin/mini; \
+    find /payload/mini -name '__pycache__' -type d -prune -exec rm -rf {} + || true
+
 # ───────────────────────── assembly + wrappers + checks ─────────────────────
 FROM debian:12-slim AS assembly
 
@@ -135,6 +185,11 @@ COPY --from=npmtools    /payload/claude   /opt/sandbox-tools/claude
 COPY --from=npmtools    /payload/opencode /opt/sandbox-tools/opencode
 COPY --from=pitools     /payload/pi       /opt/sandbox-tools/pi
 COPY --from=hermestools /payload/hermes   /opt/sandbox-tools/hermes
+COPY --from=minitools   /payload/mini     /opt/sandbox-tools/mini
+COPY --from=glibctools  /payload/glibc    /opt/sandbox-tools/glibc
+# Pi resolves package resources relative to /proc/self/exe. Keep its loader in
+# the Pi directory so explicit-loader launch preserves that resource base.
+COPY --from=glibctools  /payload/glibc/ld-linux-x86-64.so.2 /opt/sandbox-tools/pi/glibc-loader
 
 # ── Launcher wrappers ──
 # Kept as tiny POSIX-sh scripts (every sandbox image has /bin/sh) so that:
@@ -144,13 +199,22 @@ COPY --from=hermestools /payload/hermes   /opt/sandbox-tools/hermes
 #     itself is mounted read-only
 RUN set -eux; \
     mkdir -p /opt/sandbox-tools/bin; \
-    for tool in codex claude pi opencode hermes; do \
+    for tool in codex claude pi opencode hermes mini; do \
         case "$tool" in \
             codex)    target='"$TOOLS_DIR/codex/bin/codex"' ;; \
             claude)   target='"$TOOLS_DIR/claude/claude"' ;; \
             pi)       target='"$TOOLS_DIR/pi/pi"' ;; \
             opencode) target='"$TOOLS_DIR/opencode/opencode"' ;; \
             hermes)   target='"$TOOLS_DIR/hermes/python/bin/python3" "$TOOLS_DIR/hermes/python/bin/hermes"' ;; \
+            mini)     target='"$TOOLS_DIR/mini/python/bin/python3" "$TOOLS_DIR/mini/python/bin/mini"' ;; \
+        esac; \
+        case "$tool" in \
+            mini) prologue=': "${MSWEA_GLOBAL_CONFIG_DIR:=${TMPDIR:-/tmp}/mini-swe-agent}"; export MSWEA_GLOBAL_CONFIG_DIR  # created on import; must be writable' ;; \
+            *)    prologue=':' ;; \
+        esac; \
+        case "$tool" in \
+            pi) loader='"$TOOLS_DIR/pi/glibc-loader"' ;; \
+            *)  loader='"$TOOLS_DIR/glibc/ld-linux-x86-64.so.2"' ;; \
         esac; \
         { \
             echo '#!/bin/sh'; \
@@ -169,13 +233,19 @@ RUN set -eux; \
             echo 'TOOLS_DIR="$(cd "$(dirname "$SELF")/.." && pwd)"'; \
             echo '# The in-pod agent runs under a bundled Python; never leak it into the CLI.'; \
             echo 'unset PYTHONHOME PYTHONPATH LD_LIBRARY_PATH'; \
-            echo "exec $target \"\$@\""; \
+            echo "$prologue"; \
+            case "$tool" in \
+                codex) echo "exec $target \"\$@\"" ;; \
+                *) echo "exec $loader --library-path \"\$TOOLS_DIR/glibc\" $target \"\$@\"" ;; \
+            esac; \
         } > "/opt/sandbox-tools/bin/$tool"; \
         chmod 0755 "/opt/sandbox-tools/bin/$tool"; \
         sh -n "/opt/sandbox-tools/bin/$tool"; \
     done
 
 # Record the versions that were baked in, for debugging inside sandboxes.
+# `mini` is a typer app with no --version flag, so its version is read from the
+# package instead (with the startup banner silenced).
 RUN set -eux; \
     { \
         echo "codex    $(/opt/sandbox-tools/bin/codex --version 2>&1 | head -1)"; \
@@ -183,6 +253,7 @@ RUN set -eux; \
         echo "pi       $(/opt/sandbox-tools/bin/pi --version 2>&1 | head -1)"; \
         echo "opencode $(/opt/sandbox-tools/bin/opencode --version 2>&1 | head -1)"; \
         echo "hermes   $(/opt/sandbox-tools/bin/hermes --version 2>&1 | head -1)"; \
+        echo "mini     $(MSWEA_SILENT_STARTUP=1 /opt/sandbox-tools/mini/python/bin/python3 -c 'import minisweagent; print(minisweagent.__version__)' 2>&1 | tail -1)"; \
     } > /opt/sandbox-tools/VERSIONS; \
     cat /opt/sandbox-tools/VERSIONS
 
@@ -202,22 +273,37 @@ RUN { \
 
 # ── Sanity check: every wrapper must work from a relocated path AND through a
 #    symlink (how they are exposed in /usr/local/bin inside sandboxes) ──
+# `mini` has no --version flag; --help exercises the same import path.
 RUN set -eux; \
     cp -a /opt/sandbox-tools /tmp/relocated; \
     mkdir -p /tmp/linkdir; \
-    for tool in codex claude pi opencode hermes; do \
-        "/tmp/relocated/bin/$tool" --version; \
+    for tool in codex claude pi opencode hermes mini; do \
+        case "$tool" in mini) probe='--help' ;; *) probe='--version' ;; esac; \
+        "/tmp/relocated/bin/$tool" "$probe" >/dev/null; \
         ln -s "/tmp/relocated/bin/$tool" "/tmp/linkdir/$tool"; \
-        "/tmp/linkdir/$tool" --version; \
+        "/tmp/linkdir/$tool" "$probe" >/dev/null; \
     done; \
     rm -rf /tmp/relocated /tmp/linkdir; \
     du -sh /opt/sandbox-tools
+
+# Exercise the same wrappers on a musl host. The final image copies from this
+# stage so BuildKit cannot prune the compatibility check.
+FROM alpine:3.22 AS alpinecheck
+
+COPY --from=assembly /opt/sandbox-tools /opt/sandbox-tools
+
+RUN set -eux; \
+    for tool in codex claude pi opencode hermes mini; do \
+        case "$tool" in mini) probe='--help' ;; *) probe='--version' ;; esac; \
+        "/opt/sandbox-tools/bin/$tool" "$probe" >/dev/null; \
+    done; \
+    test "$(/opt/sandbox-tools/bin/pi --version)" != "0.0.0"
 
 # ─────────────────────────── Final image: payload only ──────────────────────
 # busybox provides the `cp` used by "initcontainer" mode; "image" volume mode
 # ignores the CMD and mounts the filesystem directly.
 FROM busybox:latest
 
-COPY --from=assembly /opt/sandbox-tools /opt/sandbox-tools
+COPY --from=alpinecheck /opt/sandbox-tools /opt/sandbox-tools
 
 CMD ["sh", "-c", "cp -a /opt/sandbox-tools/. /tools-volume/"]

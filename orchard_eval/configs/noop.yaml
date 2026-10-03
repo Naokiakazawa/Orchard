@@ -1,0 +1,61 @@
+# Sanity check: run SWE-bench Verified's own tests with NO patch applied.
+#
+# The expected result is ~0% resolved, and ~100% of instances producing
+# parseable test results. This is the floor that `configs/gold.yaml` is the
+# ceiling for: gold says the harness *can* score a correct fix, this says the
+# harness is not handing out points for nothing.
+#
+#   export SANDBOX_BASE_URL=... SANDBOX_API_KEY=...
+#   python scripts/no_patch_check.py --limit 50
+#
+# No model credentials are needed: nothing calls a model.
+
+run_name: noop-swebench-verified
+output_dir: ./results
+concurrency: 32
+max_retries: 2
+# Whole-rollout attempts when the pod is lost mid-instance (reaped, evicted).
+# This is the catch-all: any cluster fault the suite does not recognize still
+# earns every one of these pods.
+rollout_retries: 2
+# Attempts for a rollout that spent its whole budget instead of losing its pod.
+# Lower on purpose — a deadline is usually a property of the instance, and the
+# next pod spends the same half hour reaching the same wall. Not zero, because
+# a pod that dies in the last seconds of its budget looks exactly like one that
+# ran out of it, and one spare attempt is cheaper than dropping an instance
+# that would have scored. Raise to rollout_retries to treat them alike.
+timeout_retries: 1
+resume: true
+
+harness:
+  name: noop
+  timeout: 300
+  params:
+    # Diff the rollout pod after the reset to base_commit; it must be empty.
+    # A non-empty one means the image leaves state behind that would leak into
+    # every patch this suite extracts.
+    verify_clean: true
+
+model:
+  # Unused. Present so the run records what it was, which is nothing.
+  name: none
+
+sandbox:
+  cpu: "2"
+  memory: "8Gi"
+  create_timeout: 600
+  command_timeout: 180
+  block_network: false
+  image_prefix: mirror.gcr.io/swebench
+  workdir: /testbed
+
+dataset:
+  name: swe-bench-verified
+  split: test
+
+grading:
+  enabled: true
+  eval_timeout: 1200
+  # Without this, an empty patch is short-circuited to EMPTY_PATCH and no
+  # tests ever run — the check would measure nothing.
+  grade_empty_patch: true

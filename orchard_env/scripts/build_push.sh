@@ -38,7 +38,7 @@ AGENT_INJECTOR_IMAGE_TAG="${AGENT_INJECTOR_TAG:-latest}"
 FULL_AGENT_INJECTOR_IMAGE="${ACR_NAME}.azurecr.io/${AGENT_INJECTOR_IMAGE_NAME}:${AGENT_INJECTOR_IMAGE_TAG}"
 
 # Sandbox tools: the agent CLIs mounted into every sandbox
-# (codex / claude / pi / opencode / hermes). Set the *_VERSION vars below to
+# (codex / claude / pi / opencode / hermes / mini). Set the *_VERSION vars below to
 # pin exact CLI versions.
 TOOLS_IMAGE_NAME="sandbox-tools"
 TOOLS_IMAGE_TAG="${TOOLS_TAG:-latest}"
@@ -127,13 +127,14 @@ fi
 
 # ---- Sandbox tools image (agent CLIs for every sandbox) ----
 if [[ "$BUILD_TARGET" == "all" || "$BUILD_TARGET" == "tools" ]]; then
-    echo "Building sandbox-tools image (codex + claude + pi + opencode + hermes CLIs)..."
+    echo "Building sandbox-tools image (codex + claude + pi + opencode + hermes + mini CLIs)..."
     docker build -f Dockerfile.tools \
         --build-arg "CODEX_VERSION=${CODEX_VERSION:-latest}" \
         --build-arg "CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION:-latest}" \
         --build-arg "OPENCODE_VERSION=${OPENCODE_VERSION:-latest}" \
         ${PI_VERSION:+--build-arg "PI_VERSION=${PI_VERSION}"} \
         ${HERMES_VERSION:+--build-arg "HERMES_VERSION=${HERMES_VERSION}"} \
+        ${MINI_SWE_AGENT_VERSION:+--build-arg "MINI_SWE_AGENT_VERSION=${MINI_SWE_AGENT_VERSION}"} \
         -t "$FULL_TOOLS_IMAGE" .
     echo "✓ Image built: $FULL_TOOLS_IMAGE"
     echo ""

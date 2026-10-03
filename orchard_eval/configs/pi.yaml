@@ -1,0 +1,110 @@
+# SWE-bench Verified with the `pi` coding agent.
+#
+# Like codex, pi ships inside every Orchard Env sandbox, so switching between
+# the two is a one-line change:
+#
+#   export MODEL_NAME=... MODEL_BASE_URL=... API_KEY=...
+#   export SANDBOX_BASE_URL=... SANDBOX_API_KEY=...
+#   orchard-eval run -c configs/pi.yaml
+#   orchard-eval run -c configs/pi.yaml harness.name=codex
+
+run_name: pi-swebench-verified
+output_dir: ./results
+concurrency: 32
+max_retries: 2
+# Whole-rollout attempts when the pod is lost mid-instance (reaped, evicted).
+# This is the catch-all: any cluster fault the suite does not recognize still
+# earns every one of these pods.
+rollout_retries: 2
+# Attempts for a rollout that spent its whole budget instead of losing its pod.
+# Lower on purpose — a deadline is usually a property of the instance, and the
+# next pod spends the same half hour reaching the same wall. Not zero, because
+# a pod that dies in the last seconds of its budget looks exactly like one that
+# ran out of it, and one spare attempt is cheaper than dropping an instance
+# that would have scored. Raise to rollout_retries to treat them alike.
+timeout_retries: 1
+resume: true
+
+harness:
+  name: pi
+  timeout: 1800
+  params:
+    # `--mode json` emits an event stream instead of prose, for trajectories.
+    extra_args: []
+    # Stop the CLI 60s before harness.timeout, from inside the sandbox.
+    #
+    # The deadline the orchestrator puts on the exec is enforced by racing an
+    # in-pod `timeout` against a Python deadline ten seconds later, and when
+    # the latter wins it abandons the exec stream instead of draining it: the
+    # rollout returns a null exit code and zero bytes, throwing away everything
+    # the agent wrote, and the sandbox stops answering so neither the stdout
+    # mirror nor `git diff` can recover it. That cost 18 of 500 pi rollouts and
+    # 17 of 500 mini-swe-agent ones on SWE-bench Verified — the deadline is
+    # what is fragile, not either CLI.
+    #
+    # Stopping the agent first means the exec returns through its ordinary
+    # path, with the transcript and the working tree intact and gradable. The
+    # price is 60s off the agent's budget; raise it if teardown still loses the
+    # race, lower it to give the agent more room.
+    timeout_margin: 60
+    # Output-token cap, staged in pi's models.json. A reasoning model reaches
+    # this mid-message — and pi ends the whole session on the first truncated
+    # completion rather than re-prompting, so the rollout stops with whatever
+    # diff existed at that point, usually none. Such rollouts are marked
+    # `agent_error` and counted as `length_truncated` in summary.json.
+    #
+    # 16384 is pi's own default, set explicitly so the number a run used is
+    # recorded rather than inherited, and so it matches the Harbor path
+    # (ORCHARD_HARBOR_PI_MAX_TOKENS) — a cap that differs between the two makes
+    # their scores incomparable, which is the whole reason both run.
+    #
+    # Raising it does not buy what it looks like it buys. Measured on
+    # SWE-bench Verified, same model, 16384 -> 32768:
+    #
+    #   rollouts ending on stopReason=length    95/500  ->   40/500
+    #   rollouts reaching the wall-clock        29/500  ->  146/500
+    #   median rollout                            828s  ->   1090s
+    #   resolve rate                             70.0%  ->   68.8%
+    #
+    # The failure migrates from truncation to timeout rather than going away:
+    # at ~25 output tok/s one 32768-token runaway `thinking` block costs ~22
+    # minutes of a 30-minute budget. Raise this only together with
+    # `harness.timeout`, and re-check that prompt + max_tokens still fits the
+    # server's context (Qwen3.8-27B is 262144 natively; Verified peaked at
+    # ~116k input).
+    max_tokens: 16384
+    # Context size pi assumes when deciding to compact. Unset leaves pi's own
+    # default (128000) — below the model's real 262144, and on the Verified run
+    # rollouts reached 132k tokens while compacting only 10 times in 500
+    # instances. Set it to what the serving engine actually allows so pi
+    # compacts against the number that binds.
+    # context_window: 262144
+
+model:
+  # Anything OpenAI-compatible works via base_url. The suite stages it inside
+  # the pod as a pi custom provider in models.json — pi rejects any `--model`
+  # missing from its own catalog, so an endpoint alone is not enough.
+  # MODEL_NAME is the bare served id with no openai/ prefix; it goes into the
+  # request body, while `--model` uses a stable alias.
+  name: ${MODEL_NAME}
+  base_url: ${MODEL_BASE_URL}
+  api_key_env: API_KEY
+
+sandbox:
+  # base_url and api_key come from SANDBOX_BASE_URL / SANDBOX_API_KEY.
+  cpu: "2"
+  memory: "8Gi"
+  create_timeout: 600
+  command_timeout: 180
+  # The CLI calls the model from inside the pod, so egress is required.
+  block_network: false
+  image_prefix: mirror.gcr.io/swebench
+  workdir: /testbed
+
+dataset:
+  name: swe-bench-verified
+  split: test
+
+grading:
+  enabled: true
+  eval_timeout: 1200

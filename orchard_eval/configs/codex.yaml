@@ -1,0 +1,128 @@
+# SWE-bench Verified with the OpenAI Codex CLI.
+#
+# Codex is already on PATH inside every Orchard Env sandbox, so nothing is
+# installed at run time — the whole harness is one `codex exec` per instance.
+#
+#   export MODEL_NAME=... MODEL_BASE_URL=... API_KEY=...
+#   export SANDBOX_BASE_URL=... SANDBOX_API_KEY=...
+#   orchard-eval run -c configs/codex.yaml
+
+run_name: codex-swebench-verified
+output_dir: ./results
+concurrency: 32
+max_retries: 2
+# Whole-rollout attempts when the pod is lost mid-instance (reaped, evicted).
+# This is the catch-all: any cluster fault the suite does not recognize still
+# earns every one of these pods.
+rollout_retries: 2
+# Attempts for a rollout that spent its whole budget instead of losing its pod.
+# Lower on purpose — a deadline is usually a property of the instance, and the
+# next pod spends the same half hour reaching the same wall. Not zero, because
+# a pod that dies in the last seconds of its budget looks exactly like one that
+# ran out of it, and one spare attempt is cheaper than dropping an instance
+# that would have scored. Raise to rollout_retries to treat them alike.
+timeout_retries: 1
+resume: true
+
+harness:
+  name: codex
+  # Wall clock for one rollout. Codex stops itself well before this on most
+  # instances; the limit exists to bound a pathological one.
+  timeout: 1800
+  params:
+    # Appended verbatim to the command. `--json` swaps the human-readable log
+    # for a JSONL event stream, which is what you want for trajectory capture.
+    extra_args: []
+    # Stop the CLI 60s before harness.timeout, from inside the sandbox.
+    #
+    # The deadline the orchestrator puts on the exec is enforced by racing an
+    # in-pod `timeout` against a Python deadline ten seconds later, and when
+    # the latter wins it abandons the exec stream instead of draining it: the
+    # rollout returns a null exit code and zero bytes, throwing away everything
+    # the agent wrote, and the sandbox stops answering so neither the stdout
+    # mirror nor `git diff` can recover it. That cost 18 of 500 pi rollouts and
+    # 17 of 500 mini-swe-agent ones on SWE-bench Verified — the deadline is
+    # what is fragile, not either CLI.
+    #
+    # Stopping the agent first means the exec returns through its ordinary
+    # path, with the transcript and the working tree intact and gradable. The
+    # price is 60s off the agent's budget; raise it if teardown still loses the
+    # race, lower it to give the agent more room.
+    timeout_margin: 60
+    # Protocol declared for the staged provider. `responses` is what current
+    # codex requires (codex#10157 made `chat` a startup error) and what a
+    # recent SGLang/vLLM serves at /v1/responses. Override with
+    # `--wire-api chat` for an older codex or a server without that route.
+    wire_api: responses
+    # Keep each rollout's untouched stdout/stderr next to the parsed
+    # trajectory, so a bad exchange with the model server can be diagnosed
+    # after the sandbox is gone.
+    dump_raw_trajectory: true
+    # How hard codex is told to think, as `model_reasoning_effort` in the
+    # staged config. Leave it unset. Unset means codex sends `reasoning: {}`
+    # (captured 2026-09-22 by `python scripts/capture_codex_request.py`), so
+    # no `reasoning_effort` reaches the server and Qwen3.8-27B's chat template
+    # applies its own default('xhigh') — the highest level the template has,
+    # and the one mini-swe-agent, pi and claude-code all end up on too.
+    #
+    # `high` is not available here however much it sounds like more: the
+    # template accepts xhigh/medium/low and raises on everything else, so on
+    # this fleet setting it 4xxs every request. It is worth naming because
+    # Harbor's own codex agent defaults to `high`, and on SWE-bench Pro that
+    # default was once the largest difference between the two paths: one
+    # model, one fleet, one set of pods scored 34.47% here and 43.09% through
+    # Harbor, on 2,394 reasoning tokens per rollout against Harbor's 6,050.
+    # The Harbor stages in scripts/run_all_evals.sh now pass
+    # `--ak reasoning_effort=null` to drop that default, which lands both arms
+    # on xhigh.
+    #
+    # So there is nothing to set here to think harder — unset is already the
+    # top of the scale. `low` and `medium` are the only two values that would
+    # be honoured rather than rejected, and both are a step down:
+    #
+    # reasoning_effort: medium
+    #
+    # The effort survives `model_supports_reasoning_summaries = false` —
+    # captured 2026-09-14 with `python scripts/capture_codex_request.py
+    # --reasoning-effort high`, whose first request body carried
+    # `"reasoning": {"effort": "high"}` and no `summary` key. So the two
+    # settings below stay off: they exist to stop codex replaying its own
+    # summaries as `summary: [{"type": "summary_text"}]`, which a server
+    # modelling reasoning as `reasoning_text` rejects on turn 2, and turning
+    # them on buys nothing the effort does not already deliver.
+    #
+    # reasoning_summaries: false
+    # reasoning_summary: none
+
+model:
+  # Any OpenAI-compatible endpoint (vLLM, SGLang, a gateway). The suite writes
+  # it into the sandbox as a Codex `model_provider` — Codex ignores
+  # OPENAI_BASE_URL and would otherwise call api.openai.com. MODEL_BASE_URL
+  # must be the /v1 root, since Codex appends the protocol path to it.
+  # MODEL_NAME goes to `-m` verbatim, so it must be the bare served id with no
+  # openai/ prefix. API_KEY may be any placeholder when the server was started
+  # without --api-key.
+  name: ${MODEL_NAME}
+  base_url: ${MODEL_BASE_URL}
+  api_key_env: API_KEY
+
+sandbox:
+  # base_url and api_key come from SANDBOX_BASE_URL / SANDBOX_API_KEY.
+  cpu: "2"
+  memory: "8Gi"
+  create_timeout: 600
+  command_timeout: 180
+  # The CLI calls the model from inside the pod, so egress is required.
+  block_network: false
+  # Docker Hub pull-through cache; avoids rate limits when launching hundreds
+  # of sandboxes at once. Swap for your own ACR if you have one.
+  image_prefix: mirror.gcr.io/swebench
+  workdir: /testbed
+
+dataset:
+  name: swe-bench-verified
+  split: test
+
+grading:
+  enabled: true
+  eval_timeout: 1200

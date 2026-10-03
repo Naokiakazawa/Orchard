@@ -45,7 +45,7 @@ python examples/getting_started.py --help
 
 ## [`agent_harness.py`](agent_harness.py)
 
-The bundled agent harnesses (`codex`, `claude`, `pi`, `opencode`, `hermes`) are
+The bundled agent harnesses (`codex`, `claude`, `pi`, `opencode`, `hermes`, `mini`) are
 on `PATH` in every sandbox, whatever the base image.
 
 ```bash

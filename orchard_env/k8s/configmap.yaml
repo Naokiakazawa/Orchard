@@ -47,7 +47,7 @@ data:
   # Mounted read-only straight from the image (no per-pod copy); switch
   # SANDBOX_TOOLS_VOLUME_MODE to "initcontainer" on clusters older than k8s 1.33.
   ENABLE_SANDBOX_TOOLS: "true"
-  SANDBOX_TOOLS_IMAGE: "${ACR_NAME}.azurecr.io/sandbox-tools:latest"
+  SANDBOX_TOOLS_IMAGE: "${ACR_NAME}.azurecr.io/sandbox-tools:${TOOLS_TAG}"
   SANDBOX_TOOLS_VOLUME_MODE: "image"
   SANDBOX_TOOLS_MOUNT_PATH: "/opt/sandbox-tools"
   

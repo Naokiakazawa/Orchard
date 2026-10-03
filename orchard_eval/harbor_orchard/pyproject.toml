@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=77.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "harbor-orchard"
+version = "0.1.0"
+description = "Run Harbor tasks (terminal-bench and friends) on Orchard Env sandboxes"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+    "orchard-env>=0.1.0",
+]
+
+[project.optional-dependencies]
+# Only the environment provider needs Harbor itself. The parser, the translator
+# and `harbor-orchard audit` deliberately do not, so a Dockerfile can be checked
+# on a laptop with nothing else installed.
+harbor = [
+    "harbor>=0.1.0",
+]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.11.0",
+    "ruff>=0.1.6",
+]
+all = [
+    "harbor-orchard[harbor,dev]",
+]
+
+[project.scripts]
+harbor-orchard = "harbor_orchard.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/microsoft/Orchard-Agentic"
+Repository = "https://github.com/microsoft/Orchard-Agentic"
+
+[tool.setuptools.packages.find]
+include = ["harbor_orchard*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.black]
+line-length = 88
+target-version = ['py311']
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = ["E501"]

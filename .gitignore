@@ -83,3 +83,6 @@ kubeconfig
 # Test artifacts
 **/timing_*.json
 **/pty_timing_*.json
+
+# Local worktrees
+.worktrees/
